@@ -2,14 +2,16 @@
 """claude-pool: run `claude` on whichever of your accounts has the most usage left.
 
 Drop-in for the Claude Code CLI: `claude-pool -p "hi" --output-format json` takes the same arguments and prints
-the same output as `claude`. Before each run it picks the free account with the lowest 7-day usage (then 5-hour),
-and in print mode (-p) a run cut off by a usage limit is rerun at once on the next free account.
+the same output as `claude`. Before each run it picks a free account, and in print mode (-p) a run cut off by a
+usage limit is rerun at once on the next free account.
 
 Accounts: one file per account in $CLAUDE_POOL_DIR (default ~/.config/claude-pool):
   <name>.token   an OAuth token from `claude setup-token` (Claude subscription)
   <name>.key     an Anthropic API key
 Rename a file to <name>.token.off to take the account out. The folder is reread on every run. With no files,
 claude-pool runs claude with your normal login, so it is safe to install before you add any accounts.
+
+By default it drains first the usage that expires first (CLAUDE_POOL_STRATEGY, see the README).
 
 Usage is read from the `rate_limit_event` that `claude -p --output-format stream-json --verbose` emits, so in
 print mode claude-pool always runs claude that way and converts the output back to the format you asked for.
@@ -24,6 +26,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -31,7 +34,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 
@@ -84,11 +87,27 @@ def at_limit(row, now=None):
     return None
 
 
-def choose(pool, usage, skip=()):
-    """The free account with the lowest 7-day usage (then 5-hour), else None. Never used counts as 0."""
-    free = [n for n in pool if n not in skip and not at_limit(usage.get(n) or {})]
-    return min(free, key=lambda n: ((usage.get(n) or {}).get("seven_day") or 0,
-                                    (usage.get(n) or {}).get("five_hour") or 0), default=None)
+def choose(pool, usage, skip=(), now=None):
+    """The free account to run on next, else None.
+
+    drain (default): the account whose 7-day window resets soonest, since its unused room is lost first; then the
+    most used. Accounts with no live window (never used, or reset since) come last, so they don't start a window
+    before it's needed. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour window is used only when every
+    free account is, so a run is less likely to be cut off midway.
+    balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0."""
+    now = now or time.time()
+    row = lambda n: usage.get(n) or {}  # noqa: E731
+    free = [n for n in pool if n not in skip and not at_limit(row(n), now)]
+    if os.environ.get("CLAUDE_POOL_STRATEGY") == "balance":
+        return min(free, key=lambda n: (row(n).get("seven_day") or 0, row(n).get("five_hour") or 0), default=None)
+    margin = float(os.environ.get("CLAUDE_POOL_SWITCH_AT") or 90)
+    roomy = [n for n in free if (row(n).get("five_hour") or 0) < margin or (row(n).get("resets_ts") or 0) <= now]
+
+    def key(n):
+        reset = row(n).get("seven_day_resets_ts") or 0
+        live = reset > now
+        return (not live, reset if live else 0, -(row(n).get("seven_day") or 0) if live else 0, n)
+    return min(roomy or free, key=key, default=None)
 
 
 def record(name, info, ran=True):
@@ -162,6 +181,17 @@ def real_binary():
     return path
 
 
+def piped_stdin(wait=3.0):
+    """A prompt piped on stdin, read whole so a rerun can send it again; None for a terminal. Like claude, give
+    up when nothing arrives within `wait` seconds, so a caller that leaves stdin open without writing doesn't hang."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return None
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], wait)[0]:
+        return b""
+    return sys.stdin.buffer.read()
+
+
 def run_once(cmd, env, data, live):
     """One claude run; returns (exit code, events). With `live`, each stream-json line is written out as it comes."""
     p = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE if data is not None else None, stdout=subprocess.PIPE)
@@ -209,7 +239,7 @@ def run(args):
     cmd = [real_binary()] + sargs
     streaming_in = flag_value(args, "--input-format")[0] == "stream-json"
     # A prompt piped on stdin is read once, so a rerun gets it again. A stream-json conversation can't be replayed.
-    data = None if streaming_in or sys.stdin.isatty() else sys.stdin.buffer.read()
+    data = None if streaming_in else piped_stdin()
     tried, switched = set(), []
     name = forced or choose(pool, usage)
     if pool and not name:

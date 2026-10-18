@@ -7,7 +7,7 @@ claude-pool -p "summarize this repo" --output-format json   # same args, same ou
 ```
 
 - **Same interface.** It takes the same arguments as `claude` and prints the same output (`text`, `json`, `stream-json`). Any script or app that runs `claude -p` can switch by changing one word, or by pointing its "claude binary" setting at `claude-pool`.
-- **Picks the account.** Each run uses the free account with the lowest 7-day usage, then the lowest 5-hour usage.
+- **Picks the account.** By default it drains first the usage that expires first (see [Picking an account](#picking-an-account)).
 - **Reruns on limits.** In print mode (`-p`), a run cut off by a usage limit is rerun right away on the next free account.
 - **Shared usage.** Usage numbers live in one file under a lock, so parallel callers and different programs all see the same numbers.
 - **One file.** It's Python 3.8+ with the standard library only. With no accounts set up, it just runs `claude` with your normal login.
@@ -61,7 +61,17 @@ The JSON result gets two extra fields:
 
 An account counts as full when a window is at 100% (`CLAUDE_POOL_LIMIT`), or when its last run was rejected, until that window resets. When every account is full, claude-pool doesn't start `claude`. It prints an `error_pool_exhausted` result and exits with code **75** (`EX_TEMPFAIL`), so callers can wait until the reset.
 
-A piped prompt (`echo hi | claude-pool -p`) is read once and sent again on a rerun. A stream-json input conversation (`--input-format stream-json`) can't be replayed, so it's never rerun.
+### Picking an account
+
+Usage you don't spend before a window resets is lost. So the default strategy, **`drain`**, gets the most out of your accounts:
+
+1. **Soonest reset first.** It takes the account whose 7-day window resets soonest, because that account's leftover room expires first. If two reset at the same time, it takes the more used one.
+2. **Unused accounts last.** Accounts with no live window (never used, or reset since) wait until the others are full. That way a new window doesn't start before it's needed.
+3. **The 5-hour margin.** Once an account passes `CLAUDE_POOL_SWITCH_AT` (90%) of its 5-hour window, it's used only when every free account has passed it too. This makes a cut-off in the middle of a run less likely.
+
+`CLAUDE_POOL_STRATEGY=balance` uses the lowest 7-day usage instead, which spreads the load evenly.
+
+A piped prompt (`echo hi | claude-pool -p`) is read once and sent again on a rerun. If a caller leaves stdin open without writing to it, claude-pool stops waiting after 3 seconds, as `claude` does. A stream-json input conversation (`--input-format stream-json`) can't be replayed, so it's never rerun.
 
 Interactive sessions and subcommands (`claude-pool`, `claude-pool mcp list`) pick the account and then hand straight over to `claude`.
 
@@ -76,6 +86,8 @@ Interactive sessions and subcommands (`claude-pool`, `claude-pool mcp list`) pic
 | `CLAUDE_POOL_BINARY` | `claude` | the real CLI |
 | `CLAUDE_POOL_ACCOUNT` | | always use this account, no rotation |
 | `CLAUDE_POOL_LIMIT` | `100` | percent of a window that counts as full |
+| `CLAUDE_POOL_STRATEGY` | `drain` | `drain` (soonest weekly reset first) or `balance` (lowest usage first) |
+| `CLAUDE_POOL_SWITCH_AT` | `90` | drain: 5-hour percent after which another account is preferred |
 
 ## Using it from code
 
