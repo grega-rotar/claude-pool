@@ -174,12 +174,13 @@ def log(event, **fields):
             "pid": os.getpid(), **fields}
     path = log_path()
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
-            replace(path, path + ".1")
-        with open(path, "a") as f:
-            f.write(json.dumps(line) + "\n")
-        share(path)
+        # Under a lock: on Windows two processes appending at once can overwrite each other's line.
+        with locked(path + ".lock", wait=5):
+            if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+                replace(path, path + ".1")
+            with open(path, "a") as f:
+                f.write(json.dumps(line) + "\n")
+            share(path)
     except OSError:
         pass  # a log that can't be written must never fail a run
     if event in ALERT_EVENTS:

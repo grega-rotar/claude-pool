@@ -17,8 +17,9 @@ FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
 args = sys.argv[1:]
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
-with open(os.environ["FAKE_LOG"], "a") as f:
-    f.write(json.dumps({"args": args, "token": tok}) + "\n")
+os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
+with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
+    f.write(json.dumps({"args": args, "token": tok}))
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
@@ -80,8 +81,11 @@ class PoolTest(unittest.TestCase):
     def calls(self):
         if not os.path.exists(self.log):
             return []
-        with open(self.log) as f:
-            return [json.loads(l) for l in f]
+        out = []
+        for name in sorted(os.listdir(self.log)):
+            with open(os.path.join(self.log, name)) as f:
+                out.append(json.loads(f.read()))
+        return out
 
     def test_no_accounts_uses_normal_login(self):
         r = self.run_pool("-p", "hi")
@@ -273,6 +277,9 @@ class PoolTest(unittest.TestCase):
         self.usage({"a": {"checked_ts": time.time()}})
         r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
         self.assertEqual(len(self.probes()), 2)
+        with open(self.state) as f:
+            rows = json.load(f)
+        self.assertEqual((rows["a"]["five_hour"], rows["b"]["five_hour"]), (50.0, 50.0))  # both parallel checks saved
         self.assertIn("50.0", r.stdout)
         self.assertIn("0m ago", r.stdout)
 

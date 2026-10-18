@@ -2,7 +2,7 @@
 # Two real Linux users sharing one pool (README "Option B"). Needs root: run it in a container or with sudo.
 #   docker run --rm -v "$PWD":/src:ro python:3.12-slim sh /src/tests/multiuser.sh
 set -eu
-SRC=$(cd "$(dirname "$0")/.." && pwd)
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 fail() { echo "FAIL: $*"; exit 1; }
 
 groupadd -f claude-pool
@@ -10,7 +10,9 @@ for u in alice bob; do id "$u" >/dev/null 2>&1 || useradd -m "$u"; usermod -aG c
 id carol >/dev/null 2>&1 || useradd -m carol   # not in the group
 
 POOL=/tmp/cp-multi/pool STATE=/tmp/cp-multi/state
-rm -rf /tmp/cp-multi && mkdir -p /tmp/cp-multi && chmod 755 /tmp/cp-multi
+rm -rf /tmp/cp-multi && mkdir -p /tmp/cp-multi/src && chmod 755 /tmp/cp-multi /tmp/cp-multi/src
+# The test users can't read the checkout (CI keeps it in a private home), so run a copy everyone can read.
+SRC=/tmp/cp-multi/src && cp "$REPO/claude_pool.py" "$SRC/" && chmod 644 "$SRC/claude_pool.py"
 install -d -m 2770 -g claude-pool "$POOL" "$STATE"
 # A fake claude every user can run: reports usage and echoes the prompt.
 cat > /usr/local/bin/fake-claude <<'EOF'
