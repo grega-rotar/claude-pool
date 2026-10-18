@@ -47,6 +47,10 @@ class PoolTest(unittest.TestCase):
         with open(self.fake, "w") as f:
             f.write(FAKE)
         os.chmod(self.fake, os.stat(self.fake).st_mode | stat.S_IXUSR)
+        if os.name == "nt":  # Windows runs no shebang scripts: wrap it in a .cmd
+            with open(self.fake + ".cmd", "w") as f:
+                f.write(f'@"{sys.executable}" "{self.fake}" %*\n')
+            self.fake += ".cmd"
         self.log = os.path.join(self.tmp, "log")
         self.state = os.path.join(self.tmp, "usage.json")
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_POOL", "ANTHROPIC", "CLAUDE_CODE"))}
@@ -212,6 +216,7 @@ class PoolTest(unittest.TestCase):
         c = self.calls()[0]
         self.assertEqual((c["args"], c["token"]), (["--version"], "tok-a"))
 
+    @unittest.skipIf(os.name == "nt", "a .py file is not a command on Windows")
     def test_refuses_to_call_itself(self):
         r = self.run_pool("-p", "hi", CLAUDE_POOL_BINARY=POOL)
         self.assertNotEqual(r.returncode, 0)

@@ -1,83 +1,127 @@
 # claude-pool
 
-Runs `claude` on whichever of your accounts has usage left. It takes the same arguments as `claude` and prints the same output.
+Runs `claude` on whichever of your accounts has usage left. It takes the same arguments as `claude` and prints the same output, so you only replace `claude` with `claude-pool`.
 
 ```sh
 claude-pool -p "hi" --output-format json
 ```
 
-## Install
+Works on Linux, macOS and Windows. You need Python 3.8+ and the Claude Code CLI.
+
+## Setup
+
+**1. Install**
+
+Linux / macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/grega-rotar/claude-pool/main/claude_pool.py -o ~/.local/bin/claude-pool
 chmod +x ~/.local/bin/claude-pool
 ```
 
-## Accounts
+Windows (PowerShell). This installs a `claude-pool` command:
 
-Put one file per account in `~/.config/claude-pool/`:
-
-- `<name>.token`: a token from `claude setup-token`
-- `<name>.key`: an API key
-
-Rename a file to `.off` to disable it. With no files, `claude` runs with your normal login.
-
-```sh
-claude-pool --pool-status    # usage per account
-claude-pool --pool-refresh   # check every account now
+```powershell
+py -m pip install git+https://github.com/grega-rotar/claude-pool
 ```
 
-## How it knows usage
+**2. Add accounts**
 
-Every Claude run reports the account's real usage, and claude-pool saves it. If an account's numbers are older than 5 minutes (other apps may have used it), it checks that account first with a tiny Haiku call. An account whose token fails is skipped.
+For each account, run `claude setup-token`, log in as that account, and save the token it prints into a file:
 
-## How it picks
+| OS | Folder |
+|---|---|
+| Linux / macOS | `~/.config/claude-pool/` |
+| Windows | `%APPDATA%\claude-pool\` |
 
-It uses up the account whose week ends soonest, because leftover usage is lost at the reset. When that account's 5-hour window is at 90%, it moves to the next one. Fresh accounts are saved for last.
+```sh
+mkdir -p ~/.config/claude-pool
+echo "sk-ant-oat01-..." > ~/.config/claude-pool/work.token
+chmod 600 ~/.config/claude-pool/*.token
+```
 
-If a run hits a limit, it starts over on the next account. If every account is full, it exits with code 75.
+The file name is the account name: `work.token`, `personal.token` and so on. For an API key, use `<name>.key`. To turn an account off, rename the file to `.off`.
 
-## Cost
+**3. Check**
 
-- **Time:** about 60 ms per call, plus 2-3 s when it checks accounts (all at once, at most every 5 minutes).
-- **Usage:** each check is one tiny Haiku call (about $0.0001 per account).
-- **Reruns:** a run cut off by a limit is wasted, since it starts again from scratch.
+```sh
+claude-pool --pool-refresh
+```
 
-## Requirements
+This shows every account with its usage. The one marked `<- next` is used next.
 
-- **OS:** Linux or macOS. Windows doesn't work: it uses `fcntl` and `select`.
-- **Python:** 3.8 or newer, standard library only.
-- **Claude Code CLI:** installed and on `PATH`, or set `CLAUDE_POOL_BINARY` to its full path.
-- **Network:** outbound HTTPS to `api.anthropic.com`.
-- **Tokens:** run `claude setup-token` once per account. It works on any machine, so copy the token to the server.
-- **One user:** every app that calls `claude-pool` must read the same account folder and write the same state file. If they run as different users (for example `www-data` for a web app and your own user for scripts), set `CLAUDE_POOL_DIR` and `CLAUDE_POOL_STATE` to paths both can use, through a shared group:
+## Use it in other apps
 
-  ```sh
-  sudo install -d -m 2770 -g claude /etc/claude-pool /var/lib/claude-pool
-  # each token file: chmod 640, group claude
-  export CLAUDE_POOL_DIR=/etc/claude-pool CLAUDE_POOL_STATE=/var/lib/claude-pool/usage.json
-  ```
+Anywhere you run `claude`, run `claude-pool` instead.
 
-- **Several servers:** each one keeps its own state file. Using the same accounts on several servers is fine: the 5-minute check reads the real usage, so each server sees what the others used.
-- **Services:** systemd and PHP-FPM don't load your shell profile, so set the variables in the unit file or the app's `.env`.
+```sh
+# shell / cron
+claude-pool -p "summarize today's errors" < errors.log
+```
+
+```python
+# Python
+subprocess.run(["claude-pool", "-p", prompt, "--output-format", "json"], capture_output=True, text=True)
+```
+
+```js
+// Node
+execFileSync("claude-pool", ["-p", prompt, "--output-format", "json"], { encoding: "utf8" })
+```
+
+```php
+// PHP / Laravel
+Process::run(['claude-pool', '-p', $prompt, '--output-format', 'json']);
+```
+
+If an app lets you set the path to `claude`, point it at `claude-pool`.
+
+JSON output gets one extra field, `pool_account`, which says which account ran it. If every account is full, it exits with code `75`, so your app can retry later.
+
+## How it works
+
+- **Usage:** every run reports the account's real usage, and claude-pool saves it. Numbers older than 5 minutes are checked first with a tiny Haiku call (about $0.0001), so use by other apps shows up too.
+- **Picking:** it uses up the account whose week ends soonest, because leftover usage is lost at the reset. At 90% of the 5-hour limit, it moves to the next account. New accounts go last.
+- **Limits:** if a run hits a limit, it starts over on the next account. Tool calls in the cut-off run happen a second time.
+- **Cost:** about 60 ms per call, plus 2-3 s when accounts are checked.
 
 ## Settings
 
-All settings are environment variables and all are optional.
+You don't need to change anything. If you want to, set these as environment variables.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CLAUDE_POOL_DIR` | `~/.config/claude-pool` | Folder with the account files |
-| `CLAUDE_POOL_STATE` | `~/.local/state/claude-pool/usage.json` | Saved usage, shared by all callers |
-| `CLAUDE_POOL_BINARY` | `claude` | The real Claude CLI |
-| `CLAUDE_POOL_ACCOUNT` | none | Always use this account, with no switching and no checks |
-| `CLAUDE_POOL_STRATEGY` | `drain` | `drain`: soonest weekly reset first. `balance`: lowest usage first |
-| `CLAUDE_POOL_SWITCH_AT` | `90` | Moves to the next account once the 5-hour window passes this percent |
-| `CLAUDE_POOL_FRESH` | `300` | Seconds before an account's numbers are checked again. `0` turns checks off |
-| `CLAUDE_POOL_LIMIT` | `100` | Percent at which an account counts as full |
+| `CLAUDE_POOL_DIR` | see step 2 | Folder with the account files |
+| `CLAUDE_POOL_STATE` | `~/.local/state/claude-pool/usage.json`, Windows `%LOCALAPPDATA%\claude-pool\usage.json` | Saved usage |
+| `CLAUDE_POOL_BINARY` | `claude` | Path to the real Claude CLI |
+| `CLAUDE_POOL_ACCOUNT` | none | Always use this one account |
+| `CLAUDE_POOL_STRATEGY` | `drain` | `balance` uses the least-used account instead |
+| `CLAUDE_POOL_SWITCH_AT` | `90` | 5-hour % at which it moves to the next account |
+| `CLAUDE_POOL_FRESH` | `300` | Seconds between usage checks. `0` turns them off |
+| `CLAUDE_POOL_LIMIT` | `100` | % at which an account counts as full |
+
+### Where to set them
+
+Set them where the app that calls `claude-pool` runs. Services don't read your shell profile.
+
+| Where | How |
+|---|---|
+| Your terminal (Linux / macOS) | Add `export CLAUDE_POOL_FRESH=600` to `~/.bashrc` or `~/.zshrc` |
+| Windows | `setx CLAUDE_POOL_FRESH 600`, then open a new terminal. Or: Settings → System → About → Advanced system settings → Environment Variables |
+| systemd service | `Environment=CLAUDE_POOL_FRESH=600` under `[Service]`, then `systemctl daemon-reload` and restart the service |
+| cron | Put `CLAUDE_POOL_FRESH=600` on a line above the jobs in `crontab -e` |
+| PHP-FPM | `env[CLAUDE_POOL_FRESH] = 600` in the pool config (`www.conf`), then restart PHP-FPM |
+| Docker | `environment:` in `docker-compose.yml`, or `-e CLAUDE_POOL_FRESH=600` |
+| One command | `CLAUDE_POOL_ACCOUNT=work claude-pool -p "hi"` |
+
+### Running on a server
+
+- **Same files everywhere:** every app has to use the same account folder and usage file. If your apps run as different users (for example `www-data` and your own user), put both in one group and point `CLAUDE_POOL_DIR` and `CLAUDE_POOL_STATE` at a folder that group can write.
+- **Several servers:** they can share the same accounts. Each server checks real usage, so it sees what the others used.
+- **Tokens:** `claude setup-token` works on any machine, so you can make the tokens on your laptop and copy the files to the server.
 
 ## Notes
 
-- Using several accounts to get around usage limits breaks Anthropic's terms.
+Using several accounts to get around usage limits breaks Anthropic's terms.
 
 MIT
