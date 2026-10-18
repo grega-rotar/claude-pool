@@ -29,6 +29,6 @@ CLAUDE_POOL_TOKEN_WORK=sk-ant-oat01-...
 claude-pool -p "hi"
 ```
 
-`claude-pool --pool-help` lists all commands and settings.
+`claude-pool --pool-help` lists all commands. More: [settings](docs/settings.md), [how it works](docs/how-it-works.md), [servers](docs/server.md).
 
 Using several accounts to get around usage limits breaks Anthropic's terms. MIT.
