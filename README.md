@@ -114,11 +114,78 @@ Set them where the app that calls `claude-pool` runs. Services don't read your s
 | Docker | `environment:` in `docker-compose.yml`, or `-e CLAUDE_POOL_FRESH=600` |
 | One command | `CLAUDE_POOL_ACCOUNT=work claude-pool -p "hi"` |
 
-### Running on a server
+## Several users on one server
 
-- **Same files everywhere:** every app has to use the same account folder and usage file. If your apps run as different users (for example `www-data` and your own user), put both in one group and point `CLAUDE_POOL_DIR` and `CLAUDE_POOL_STATE` at a folder that group can write.
-- **Several servers:** they can share the same accounts. Each server checks real usage, so it sees what the others used.
-- **Tokens:** `claude setup-token` works on any machine, so you can make the tokens on your laptop and copy the files to the server.
+Each Linux user has its own home folder, so by default each user has its own accounts and its own usage file. A web app often runs as `www-data`, a script as `deploy`, and you as yourself. Pick one of two setups.
+
+### Option A: each user on its own (simplest)
+
+Do steps 1-2 of [Setup](#setup) for each user. They can use the same tokens.
+
+- **Good:** nothing to share, no permissions to set up.
+- **Downside:** each user knows only its own runs. It sees what the others used only at the 5-minute check. In between, two users can pick the same account, and that's fine unless the account is nearly full.
+
+### Option B: one shared pool (recommended for busy servers)
+
+All users read one account folder and write one usage file, so each one sees the others' usage right away.
+
+**1. Make a group and add every user that runs claude-pool:**
+
+```sh
+sudo groupadd claude-pool
+sudo usermod -aG claude-pool www-data
+sudo usermod -aG claude-pool deploy
+```
+
+A user has to log in again (or restart its service) before the new group takes effect.
+
+**2. Make the shared folders.** `2770` means the group can read and write, others get nothing, and new files belong to the group:
+
+```sh
+sudo install -d -m 2770 -g claude-pool /etc/claude-pool        # accounts
+sudo install -d -m 2770 -g claude-pool /var/lib/claude-pool    # usage
+```
+
+**3. Add the tokens.** They should be readable by the group only (`640`):
+
+```sh
+sudo sh -c 'echo "sk-ant-oat01-..." > /etc/claude-pool/work.token'
+sudo chgrp claude-pool /etc/claude-pool/*.token
+sudo chmod 640 /etc/claude-pool/*.token
+```
+
+**4. Point every user at those folders.** Set these two variables wherever each app runs (see [Where to set them](#where-to-set-them)):
+
+```sh
+CLAUDE_POOL_DIR=/etc/claude-pool
+CLAUDE_POOL_STATE=/var/lib/claude-pool/usage.json
+```
+
+For example, for a PHP app as `www-data`, add them to the PHP-FPM pool config:
+
+```ini
+env[CLAUDE_POOL_DIR] = /etc/claude-pool
+env[CLAUDE_POOL_STATE] = /var/lib/claude-pool/usage.json
+```
+
+**5. Check as each user:**
+
+```sh
+sudo -u www-data env CLAUDE_POOL_DIR=/etc/claude-pool CLAUDE_POOL_STATE=/var/lib/claude-pool/usage.json claude-pool --pool-status
+```
+
+claude-pool makes the files it creates in a group-writable folder group-writable too (`660`), so every user can update them. A token file a user can't read is skipped with a warning.
+
+### Things to know
+
+- **Every user can read every token** in the shared folder. Add only users you trust to the group.
+- **claude needs a writable home folder.** It keeps its settings in `~/.claude.json` and `~/.claude/`. A service user like `www-data` often has a read-only home (`/var/www`). Give it a folder it can write with `CLAUDE_CONFIG_DIR=/var/lib/claude-pool/home-www-data`, or set `HOME` for that service.
+- **`claude` must be on each user's `PATH`.** It's often installed in one user's `~/.local/bin`. Install it system-wide, or set `CLAUDE_POOL_BINARY=/full/path/to/claude`.
+- **Docker:** mount `/etc/claude-pool` and `/var/lib/claude-pool` into the container, and run it with the group's ID (`group_add:` in compose).
+
+## Several servers
+
+Servers can share the same accounts. Each one keeps its own usage file, and the 5-minute check reads real usage, so every server sees what the others used. `claude setup-token` works on any machine, so make the tokens once and copy the files to each server.
 
 ## Notes
 
