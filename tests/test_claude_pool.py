@@ -23,12 +23,15 @@ prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < l
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
 out({"type": "system", "subtype": "init"})
+if tok.startswith("bad"):
+    out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Invalid bearer token"})
+    sys.exit(1)
 if tok.startswith("limit"):
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": reset,
          "unifiedWindows": {"five_hour": {"utilization": 1.0, "resetsAt": reset}, "seven_day": {"utilization": 0.5, "resetsAt": reset + 86400}}}})
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "You've hit your session limit"})
     sys.exit(1)
-util = float(os.environ.get("FAKE_UTIL", "0.2"))
+util = float(os.environ.get("FAKE_UTIL_" + tok.replace("-", "_"), os.environ.get("FAKE_UTIL", "0.2")))
 out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": reset,
      "unifiedWindows": {"five_hour": {"utilization": util, "resetsAt": reset}, "seven_day": {"utilization": util / 2, "resetsAt": reset + 86400}}}})
 out({"type": "result", "subtype": "success", "is_error": False, "result": "echo:" + prompt.strip()})
@@ -47,7 +50,7 @@ class PoolTest(unittest.TestCase):
         self.log = os.path.join(self.tmp, "log")
         self.state = os.path.join(self.tmp, "usage.json")
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_POOL", "ANTHROPIC", "CLAUDE_CODE"))}
-        self.env.update(CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
+        self.env.update(CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
                         FAKE_LOG=self.log)
 
     def add(self, name, secret, ext=".token"):
@@ -213,6 +216,52 @@ class PoolTest(unittest.TestCase):
         r = self.run_pool("-p", "hi", CLAUDE_POOL_BINARY=POOL)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("claude-pool itself", r.stderr)
+
+    def probes(self):
+        return [c for c in self.calls() if "--system-prompt" in c["args"] and "Reply ok." in c["args"]]
+
+    def test_stale_accounts_are_probed_before_the_pick(self):
+        now = time.time()
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        # b looks emptier on old numbers, but another app has used it since: the probe sees 80%.
+        self.usage({"a": {"seven_day": 30, "seven_day_resets_ts": now + 86400, "checked_ts": now - 3600},
+                    "b": {"seven_day": 30, "seven_day_resets_ts": now + 2 * 86400, "checked_ts": now - 3600}})
+        self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300", FAKE_UTIL_tok_a="0.95", FAKE_UTIL_tok_b="0.1")
+        self.assertEqual(sorted(c["token"] for c in self.probes()), ["tok-a", "tok-b"])
+        self.assertIn("--tools", self.probes()[0]["args"])
+        with open(self.state) as f:
+            rows = json.load(f)
+        self.assertEqual(rows["a"]["five_hour"], 95.0)
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")  # a is past the 90% margin now
+
+    def test_fresh_numbers_are_not_probed(self):
+        self.add("a", "tok-a")
+        self.usage({"a": {"seven_day": 30, "checked_ts": time.time() - 10}})
+        self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(self.probes(), [])
+
+    def test_api_key_accounts_are_not_probed(self):
+        self.add("api", "sk-1", ext=".key")
+        self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(self.probes(), [])
+
+    def test_broken_token_is_skipped(self):
+        self.add("a", "bad-a")
+        self.add("b", "tok-b")
+        r = self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(r.stdout, "echo:hi\n")
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")
+        self.assertIn("broken: Invalid bearer token", self.run_pool("--pool-status").stdout)
+
+    def test_pool_refresh_probes_every_account(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"checked_ts": time.time()}})
+        r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
+        self.assertEqual(len(self.probes()), 2)
+        self.assertIn("50.0", r.stdout)
+        self.assertIn("0m ago", r.stdout)
 
     def test_status_lists_accounts(self):
         self.add("a", "tok-a")

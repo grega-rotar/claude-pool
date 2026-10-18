@@ -16,7 +16,9 @@ By default it drains first the usage that expires first (CLAUDE_POOL_STRATEGY, s
 Usage is read from the `rate_limit_event` that `claude -p --output-format stream-json --verbose` emits, so in
 print mode claude-pool always runs claude that way and converts the output back to the format you asked for.
 It is kept in $CLAUDE_POOL_STATE (default ~/.local/state/claude-pool/usage.json), shared by every caller under
-a file lock.
+a file lock. Numbers older than CLAUDE_POOL_FRESH seconds (default 300) are refreshed before a pick with one tiny
+Haiku call per account (about $0.0001, 2-3 s, all accounts in parallel), so use by other apps is seen too.
+`claude-pool --pool-refresh` refreshes every account now.
 
 Other settings: CLAUDE_POOL_BINARY (the real claude, default `claude`), CLAUDE_POOL_ACCOUNT (always use this
 account), CLAUDE_POOL_LIMIT (percent of a window that counts as full, default 100).
@@ -31,10 +33,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 
@@ -97,7 +101,7 @@ def choose(pool, usage, skip=(), now=None):
     balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0."""
     now = now or time.time()
     row = lambda n: usage.get(n) or {}  # noqa: E731
-    free = [n for n in pool if n not in skip and not at_limit(row(n), now)]
+    free = [n for n in pool if n not in skip and not at_limit(row(n), now) and not broken(row(n), now)]
     if os.environ.get("CLAUDE_POOL_STRATEGY") == "balance":
         return min(free, key=lambda n: (row(n).get("seven_day") or 0, row(n).get("five_hour") or 0), default=None)
     margin = float(os.environ.get("CLAUDE_POOL_SWITCH_AT") or 90)
@@ -110,7 +114,61 @@ def choose(pool, usage, skip=(), now=None):
     return min(roomy or free, key=key, default=None)
 
 
-def record(name, info, ran=True):
+def fresh_secs():
+    return float(os.environ.get("CLAUDE_POOL_FRESH") or 300)
+
+
+def broken(row, now=None):
+    """The account's last check failed without usage numbers (a bad or revoked token): skip it until rechecked."""
+    return bool(row.get("error_ts")) and (now or time.time()) - row["error_ts"] < max(fresh_secs(), 300)
+
+
+PROBE = ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", "", "--system-prompt", "Reply ok.",
+         "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
+         "--output-format", "stream-json", "--verbose"]
+
+
+def probe(name, kind, secret, binary):
+    """One tiny Haiku call on the account, only to read its usage numbers."""
+    try:
+        r = subprocess.run([binary] + PROBE, env=account_env(kind, secret), cwd=tempfile.gettempdir(),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        out, err = r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        out, err = "", "probe timed out"
+    events = []
+    for line in out.splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            pass
+    info = next((e.get("rate_limit_info") for e in reversed(events) if e.get("type") == "rate_limit_event"), None)
+    final = next((e for e in reversed(events) if e.get("type") == "result"), {})
+    record(name, info, ran=False, error=None if info else str(final.get("result") or err.strip() or "no usage in reply")[:200])
+
+
+def refresh(pool, names=None, stale_only=False):
+    """Probe the token accounts (API keys have no usage windows) whose numbers are missing or older than
+    CLAUDE_POOL_FRESH, or all of `names`. One caller probes at a time; the others wait and reuse its numbers."""
+    def due(usage):
+        now = time.time()
+        return [n for n, (kind, _) in pool.items() if kind == "token" and (names is None or n in names)
+                and (not stale_only or now - ((usage.get(n) or {}).get("checked_ts") or 0) >= fresh_secs())]
+    if not due(load_usage()):
+        return
+    path = state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".refresh", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        binary = real_binary()
+        threads = [threading.Thread(target=probe, args=(n, *pool[n], binary)) for n in due(load_usage())]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+
+def record(name, info, ran=True, error=None):
     """Store one run's rate_limit_info for the account, under a lock so parallel callers lose no rows."""
     path = state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -123,7 +181,12 @@ def record(name, info, ran=True):
             pct = lambda k: round(100 * (w.get(k) or {}).get("utilization", 0), 1) if k in w else row.get(k)  # noqa: E731
             row.update(status=info.get("status"), five_hour=pct("five_hour"), seven_day=pct("seven_day"),
                        resets_ts=(w.get("five_hour") or {}).get("resetsAt") or info.get("resetsAt"),
-                       seven_day_resets_ts=(w.get("seven_day") or {}).get("resetsAt") or row.get("seven_day_resets_ts"))
+                       seven_day_resets_ts=(w.get("seven_day") or {}).get("resetsAt") or row.get("seven_day_resets_ts"),
+                       checked_ts=time.time())
+            row.pop("error", None)
+            row.pop("error_ts", None)
+        elif error:
+            row.update(error=error, error_ts=time.time(), checked_ts=time.time())
         if ran:
             row["runs"] = row.get("runs", 0) + 1
             row["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -231,10 +294,13 @@ def emit(fmt, verbose, events, final):
 
 def run(args):
     """Print mode: run claude on the best account, rerun on the next when a usage limit cuts it off."""
-    pool, usage = accounts(), load_usage()
+    pool = accounts()
     forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
     if forced and forced not in pool:
         sys.exit(f"claude-pool: no account {forced!r} in {pool_dir()}")
+    if not forced and fresh_secs() > 0:
+        refresh(pool, stale_only=True)
+    usage = load_usage()
     sargs, fmt, verbose = stream_args(args)
     cmd = [real_binary()] + sargs
     streaming_in = flag_value(args, "--input-format")[0] == "stream-json"
@@ -283,19 +349,25 @@ def status():
         return 0
     fmt_ts = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "-"  # noqa: E731
     best = choose(pool, usage)
-    print(f"{'account':<20} {'kind':<6} {'5h %':>6} {'7d %':>6}  {'5h reset':<21} {'7d reset':<21} runs")
+    age = lambda ts: "-" if not ts else f"{int((time.time() - ts) // 60)}m ago"  # noqa: E731
+    print(f"{'account':<20} {'kind':<6} {'5h %':>6} {'7d %':>6}  {'5h reset':<21} {'7d reset':<21} {'checked':<9} runs")
     for n, (kind, _) in pool.items():
         r = usage.get(n) or {}
         mark = " <- next" if n == best else (" (at limit)" if at_limit(r) else "")
+        if broken(r):
+            mark = f" (broken: {r.get('error')})"
         print(f"{n:<20} {kind:<6} {r.get('five_hour') if r.get('five_hour') is not None else '-':>6} "
               f"{r.get('seven_day') if r.get('seven_day') is not None else '-':>6}  {fmt_ts(r.get('resets_ts')):<21} "
-              f"{fmt_ts(r.get('seven_day_resets_ts')):<21} {r.get('runs', 0)}{mark}")
+              f"{fmt_ts(r.get('seven_day_resets_ts')):<21} {age(r.get('checked_ts')):<9} {r.get('runs', 0)}{mark}")
     return 0
 
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     if args[:1] == ["--pool-status"]:
+        return status()
+    if args[:1] == ["--pool-refresh"]:
+        refresh(accounts(), names=args[1:] or None)
         return status()
     if args[:1] == ["--pool-version"]:
         print(__version__)
@@ -304,6 +376,8 @@ def main(argv=None):
         return run(args)
     # Interactive or a subcommand: pick the account and hand over to claude.
     pool = accounts()
+    if not os.environ.get("CLAUDE_POOL_ACCOUNT") and fresh_secs() > 0:
+        refresh(pool, stale_only=True)
     name = os.environ.get("CLAUDE_POOL_ACCOUNT") or choose(pool, load_usage())
     env = account_env(*pool[name]) if name in pool else dict(os.environ)
     binary = real_binary()
