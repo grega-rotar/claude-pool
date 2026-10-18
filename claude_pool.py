@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-pool: run `claude` on whichever of your accounts has the most usage left.
+r"""claude-pool: run `claude` on whichever of your accounts has the most usage left.
 
 Drop-in for the Claude Code CLI: `claude-pool -p "hi" --output-format json` takes the same arguments and prints
 the same output as `claude`. Before each run it picks a free account, and in print mode (-p) a run cut off by a
@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 
@@ -66,10 +67,23 @@ def state_path():
     return os.path.join(base, "claude-pool", "usage.json")
 
 
+def share(path):
+    """In a group-writable folder (several users sharing one pool), make our file group-writable too, so the
+    other users can lock and replace it. Elsewhere files keep the user's umask."""
+    if WINDOWS:
+        return
+    try:
+        if os.stat(os.path.dirname(path) or ".").st_mode & stat.S_IWGRP and os.stat(path).st_uid == os.getuid():
+            os.chmod(path, 0o660)
+    except OSError:
+        pass
+
+
 @contextmanager
 def locked(path):
     """An exclusive lock on `path` across processes, held for the with-block."""
     with open(path, "a+") as f:
+        share(path)
         if not WINDOWS:
             fcntl.flock(f, fcntl.LOCK_EX)
             yield
@@ -112,7 +126,12 @@ def accounts():
     for f in sorted(os.listdir(d)):
         name, ext = os.path.splitext(f)
         if ext in (".token", ".key"):
-            secret = open(os.path.join(d, f)).read().strip()
+            try:
+                with open(os.path.join(d, f)) as fh:
+                    secret = fh.read().strip()
+            except OSError as e:  # another user's file without group read: skip it, don't fail the run
+                print(f"claude-pool: skipping {f}: {e.strerror}", file=sys.stderr)
+                continue
             if secret:
                 out[name] = ("token" if ext == ".token" else "key", secret)
     return out
@@ -236,6 +255,7 @@ def record(name, info, ran=True, error=None):
             row["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with open(path + ".tmp", "w") as f:
             json.dump(usage, f, indent=1)
+        share(path + ".tmp")
         replace(path + ".tmp", path)  # whole, so a parallel caller never reads half a file
 
 

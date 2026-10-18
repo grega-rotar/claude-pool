@@ -268,6 +268,37 @@ class PoolTest(unittest.TestCase):
         self.assertIn("50.0", r.stdout)
         self.assertIn("0m ago", r.stdout)
 
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_shared_folder_files_are_group_writable(self):
+        shared = os.path.join(self.tmp, "shared")
+        os.makedirs(shared)
+        os.chmod(shared, 0o2770)
+        self.add("a", "tok-a")
+        old = os.umask(0o022)
+        try:
+            self.run_pool("-p", "hi", CLAUDE_POOL_STATE=os.path.join(shared, "usage.json"))
+        finally:
+            os.umask(old)
+        for f in ("usage.json", "usage.json.lock"):
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(shared, f)).st_mode), 0o660, f)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_private_folder_keeps_umask(self):
+        self.add("a", "tok-a")
+        os.chmod(self.tmp, 0o700)
+        self.run_pool("-p", "hi")
+        self.assertEqual(stat.S_IMODE(os.stat(self.state).st_mode) & 0o020, 0)
+
+    @unittest.skipIf(os.name == "nt" or os.getuid() == 0, "POSIX permissions, not as root")
+    def test_unreadable_token_is_skipped(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        os.chmod(os.path.join(self.pool, "a.token"), 0)
+        r = self.run_pool("-p", "hi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("skipping a.token", r.stderr)
+        self.assertEqual(self.calls()[0]["token"], "tok-b")
+
     def test_status_lists_accounts(self):
         self.add("a", "tok-a")
         self.add("b", "tok-b")
