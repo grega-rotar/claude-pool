@@ -1,0 +1,23 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the version in the code
+        run: |
+          v=$(python3 claude_pool.py --pool-version)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but claude_pool.py says $v"; exit 1; }
+      - name: Notes from CHANGELOG.md
+        run: awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## "v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+      - run: gh release create "$GITHUB_REF_NAME" claude_pool.py --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

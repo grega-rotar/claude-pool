@@ -1,5 +1,7 @@
 # claude-pool
 
+[![test](https://github.com/grega-rotar/claude-pool/actions/workflows/test.yml/badge.svg)](https://github.com/grega-rotar/claude-pool/actions/workflows/test.yml)
+
 Runs `claude` on whichever of your accounts has usage left. It takes the same arguments as `claude` and prints the same output, so you only replace `claude` with `claude-pool`.
 
 ```sh
@@ -15,40 +17,47 @@ Works on Linux, macOS and Windows. You need Python 3.8+ and the Claude Code CLI.
 Linux / macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/grega-rotar/claude-pool/main/claude_pool.py -o ~/.local/bin/claude-pool
+curl -fsSL https://github.com/grega-rotar/claude-pool/releases/latest/download/claude_pool.py -o ~/.local/bin/claude-pool
 chmod +x ~/.local/bin/claude-pool
 ```
 
 Windows (PowerShell). This installs a `claude-pool` command:
 
 ```powershell
-py -m pip install git+https://github.com/grega-rotar/claude-pool
+py -m pip install git+https://github.com/grega-rotar/claude-pool@v0.5.0
 ```
 
 **2. Add accounts**
 
-For each account, run `claude setup-token`, log in as that account, and save the token it prints into a file:
-
-| OS | Folder |
-|---|---|
-| Linux / macOS | `~/.config/claude-pool/` |
-| Windows | `%APPDATA%\claude-pool\` |
+For each account, run `claude setup-token` and log in as that account. Then add the token it prints:
 
 ```sh
-mkdir -p ~/.config/claude-pool
-echo "sk-ant-oat01-..." > ~/.config/claude-pool/work.token
-chmod 600 ~/.config/claude-pool/*.token
+claude-pool --pool-add work        # paste the token when asked
 ```
 
-The file name is the account name: `work.token`, `personal.token` and so on. For an API key, use `<name>.key`. To turn an account off, rename the file to `.off`.
+The name (`work`) is yours to choose. The token is saved privately in `~/.config/claude-pool/work.token` (Windows: `%APPDATA%\claude-pool\`). API keys (`sk-ant-api...`) work too.
 
 **3. Check**
 
 ```sh
-claude-pool --pool-refresh
+claude-pool --pool-check
 ```
 
-This shows every account with its usage. The one marked `<- next` is used next.
+This tests claude, the folders and every token, and then shows each account's usage. The one marked `<- next` is used next.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `claude-pool --pool-help` | All commands and settings |
+| `claude-pool --pool-status` | Accounts and their usage |
+| `claude-pool --pool-refresh` | Check every account's usage now |
+| `claude-pool --pool-check` | Check the whole setup (exit 1 if something is wrong) |
+| `claude-pool --pool-add <name>` | Add an account (or pipe the token: `echo "$TOKEN" \| claude-pool --pool-add work`) |
+| `claude-pool --pool-off <name>` / `--pool-on <name>` | Take an account out / put it back |
+| `claude-pool --pool-log [N]` | The last N events: runs, switches, errors |
+
+Everything else goes straight to `claude`.
 
 ## Use it in other apps
 
@@ -81,9 +90,27 @@ JSON output gets one extra field, `pool_account`, which says which account ran i
 ## How it works
 
 - **Usage:** every run reports the account's real usage, and claude-pool saves it. Numbers older than 5 minutes are checked first with a tiny Haiku call (about $0.0001), so use by other apps shows up too.
-- **Picking:** it uses up the account whose week ends soonest, because leftover usage is lost at the reset. At 90% of the 5-hour limit, it moves to the next account. New accounts go last.
-- **Limits:** if a run hits a limit, it starts over on the next account. Tool calls in the cut-off run happen a second time.
+- **Picking:** it uses up the account whose week ends soonest, because leftover usage is lost at the reset. At 90% of the 5-hour limit, it moves to the next account. Past 75%, a busy account gets no second run while another has room. New accounts go last.
+- **Limits:** if a run hits a limit before it used any tools, it starts over on the next account. If tools already ran (files edited, commands run), it stops and returns the error instead, so nothing happens twice.
 - **Cost:** about 60 ms per call, plus 2-3 s when accounts are checked.
+
+## Log and alerts
+
+Every run, switch and error goes to `events.log`, next to the usage file. See it with `claude-pool --pool-log`.
+
+To hear about problems, set `CLAUDE_POOL_ALERT` to a command. It runs when:
+
+- every account is full,
+- a token is refused,
+- claude stops reporting usage (after a CLI update),
+- a cut-off run isn't rerun.
+
+The same alert goes out at most once an hour. The command gets `$CLAUDE_POOL_MESSAGE`, plus the event as JSON on stdin.
+
+```sh
+# Slack
+export CLAUDE_POOL_ALERT='curl -s -X POST -H "Content-Type: application/json" -d "{\"text\": \"$CLAUDE_POOL_MESSAGE\"}" https://hooks.slack.com/services/...'
+```
 
 ## Settings
 
@@ -97,8 +124,12 @@ You don't need to change anything. If you want to, set these as environment vari
 | `CLAUDE_POOL_ACCOUNT` | none | Always use this one account |
 | `CLAUDE_POOL_STRATEGY` | `drain` | `balance` uses the least-used account instead |
 | `CLAUDE_POOL_SWITCH_AT` | `90` | 5-hour % at which it moves to the next account |
+| `CLAUDE_POOL_SPREAD_AT` | `75` | 5-hour % at which a busy account gets no second run |
 | `CLAUDE_POOL_FRESH` | `300` | Seconds between usage checks. `0` turns them off |
 | `CLAUDE_POOL_LIMIT` | `100` | % at which an account counts as full |
+| `CLAUDE_POOL_RERUN` | `safe` | After a limit cut-off: `safe` (only if no tools ran), `always` or `never` |
+| `CLAUDE_POOL_ALERT` | none | Command to run on problems (see [Log and alerts](#log-and-alerts)) |
+| `CLAUDE_POOL_LOG` | next to the usage file | Event log |
 
 ### Where to set them
 
@@ -146,12 +177,10 @@ sudo install -d -m 2770 -g claude-pool /etc/claude-pool        # accounts
 sudo install -d -m 2770 -g claude-pool /var/lib/claude-pool    # usage
 ```
 
-**3. Add the tokens.** They should be readable by the group only (`640`):
+**3. Add the tokens.** In a shared folder, `--pool-add` makes them readable by the group only (`640`):
 
 ```sh
-sudo sh -c 'echo "sk-ant-oat01-..." > /etc/claude-pool/work.token'
-sudo chgrp claude-pool /etc/claude-pool/*.token
-sudo chmod 640 /etc/claude-pool/*.token
+sudo env CLAUDE_POOL_DIR=/etc/claude-pool claude-pool --pool-add work
 ```
 
 **4. Point every user at those folders.** Set these two variables wherever each app runs (see [Where to set them](#where-to-set-them)):
@@ -171,10 +200,10 @@ env[CLAUDE_POOL_STATE] = /var/lib/claude-pool/usage.json
 **5. Check as each user:**
 
 ```sh
-sudo -u www-data env CLAUDE_POOL_DIR=/etc/claude-pool CLAUDE_POOL_STATE=/var/lib/claude-pool/usage.json claude-pool --pool-status
+sudo -u www-data env CLAUDE_POOL_DIR=/etc/claude-pool CLAUDE_POOL_STATE=/var/lib/claude-pool/usage.json claude-pool --pool-check
 ```
 
-claude-pool makes the files it creates in a group-writable folder group-writable too (`660`), so every user can update them. A token file a user can't read is skipped with a warning.
+claude-pool makes the files it creates in a group-writable folder group-writable too (`660`), so every user can update them. A token file a user can't read is skipped with a warning. A user outside the group gets a clear error. This setup is tested with real users in CI (`tests/multiuser.sh`).
 
 ### Things to know
 
@@ -186,6 +215,13 @@ claude-pool makes the files it creates in a group-writable folder group-writable
 ## Several servers
 
 Servers can share the same accounts. Each one keeps its own usage file, and the 5-minute check reads real usage, so every server sees what the others used. `claude setup-token` works on any machine, so make the tokens once and copy the files to each server.
+
+## Tests
+
+```sh
+python3 -m unittest discover tests     # any OS, no account needed
+sudo sh tests/multiuser.sh             # Linux, two real users
+```
 
 ## Notes
 
