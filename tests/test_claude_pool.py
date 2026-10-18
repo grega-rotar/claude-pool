@@ -17,8 +17,9 @@ FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
 args = sys.argv[1:]
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
-with open(os.environ["FAKE_LOG"], "a") as f:
-    f.write(json.dumps({"args": args, "token": tok}) + "\n")
+os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
+with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
+    f.write(json.dumps({"args": args, "token": tok}))
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
@@ -26,7 +27,15 @@ out({"type": "system", "subtype": "init"})
 if tok.startswith("bad"):
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Invalid bearer token"})
     sys.exit(1)
+if tok.startswith("net"):
+    out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "API Error: Connection error."})
+    sys.exit(1)
+if tok.startswith("nousage"):
+    out({"type": "result", "subtype": "success", "is_error": False, "result": "echo:" + prompt.strip()})
+    sys.exit(0)
 if tok.startswith("limit"):
+    if "tool" in tok:  # the run edited something before the limit cut it off
+        out({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {}}]}})
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": reset,
          "unifiedWindows": {"five_hour": {"utilization": 1.0, "resetsAt": reset}, "seven_day": {"utilization": 0.5, "resetsAt": reset + 86400}}}})
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "You've hit your session limit"})
@@ -72,8 +81,11 @@ class PoolTest(unittest.TestCase):
     def calls(self):
         if not os.path.exists(self.log):
             return []
-        with open(self.log) as f:
-            return [json.loads(l) for l in f]
+        out = []
+        for name in sorted(os.listdir(self.log)):
+            with open(os.path.join(self.log, name)) as f:
+                out.append(json.loads(f.read()))
+        return out
 
     def test_no_accounts_uses_normal_login(self):
         r = self.run_pool("-p", "hi")
@@ -265,6 +277,9 @@ class PoolTest(unittest.TestCase):
         self.usage({"a": {"checked_ts": time.time()}})
         r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
         self.assertEqual(len(self.probes()), 2)
+        with open(self.state) as f:
+            rows = json.load(f)
+        self.assertEqual((rows["a"]["five_hour"], rows["b"]["five_hour"]), (50.0, 50.0))  # both parallel checks saved
         self.assertIn("50.0", r.stdout)
         self.assertIn("0m ago", r.stdout)
 
@@ -306,6 +321,189 @@ class PoolTest(unittest.TestCase):
         r = self.run_pool("--pool-status")
         self.assertIn("b", r.stdout)
         self.assertIn("<- next", [l for l in r.stdout.splitlines() if l.startswith("a ")][0])
+
+    # --- reruns -----------------------------------------------------------------------------------------------
+
+    def events(self):
+        path = os.path.join(self.tmp, "events.log")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [json.loads(l) for l in f]
+
+    def test_cut_off_after_tools_is_not_rerun(self):
+        self.add("a", "limittool-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}})
+        r = self.run_pool("-p", "hi", "--output-format", "json")
+        self.assertEqual([c["token"] for c in self.calls()], ["limittool-a"])
+        self.assertTrue(json.loads(r.stdout)["pool_cut_off"])
+        self.assertIn("not rerunning", r.stderr)
+        self.assertIn("cut_off_not_rerun", [e["event"] for e in self.events()])
+
+    def test_rerun_always_reruns_after_tools(self):
+        self.add("a", "limittool-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}})
+        self.run_pool("-p", "hi", CLAUDE_POOL_RERUN="always")
+        self.assertEqual([c["token"] for c in self.calls()], ["limittool-a", "tok-b"])
+
+    def test_rerun_never(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}})
+        self.run_pool("-p", "hi", CLAUDE_POOL_RERUN="never")
+        self.assertEqual([c["token"] for c in self.calls()], ["limit-a"])
+
+    def test_cut_off_is_logged_with_its_raw_result(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}})
+        self.run_pool("-p", "hi")
+        ev = {e["event"]: e for e in self.events()}
+        self.assertEqual((ev["cut_off"]["result"], ev["cut_off"]["status"]), ("You've hit your session limit", "rejected"))
+        self.assertEqual((ev["switch"]["account"], ev["switch"]["to"]), ("a", "b"))
+        self.assertEqual([e["account"] for e in self.events() if e["event"] == "run"], ["a", "b"])
+
+    # --- checks -----------------------------------------------------------------------------------------------
+
+    def test_network_error_does_not_mark_token_broken(self):
+        self.add("a", "net-a")
+        self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300")
+        with open(self.state) as f:
+            row = json.load(f)["a"]
+        self.assertNotIn("error_ts", row)
+        self.assertIn("checked_ts", row)  # not checked again on the next call
+        self.assertIn("probe_failed", [e["event"] for e in self.events()])
+
+    def test_cli_without_usage_numbers_is_reported(self):
+        self.add("a", "nousage-a")
+        r = self.run_pool("--pool-check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("printed no usage numbers", r.stdout)
+        self.assertIn("cli_changed", [e["event"] for e in self.events()])
+
+    def test_waits_at_most_5s_for_another_callers_check(self):
+        sys.path.insert(0, ROOT)
+        import claude_pool
+        self.add("a", "tok-a")
+        os.environ["CLAUDE_POOL_STATE"] = self.state
+        try:
+            with claude_pool.locked(self.state + ".refresh"):
+                start = time.time()
+                r = self.run_pool("-p", "hi", CLAUDE_POOL_FRESH="300")
+                took = time.time() - start
+        finally:
+            del os.environ["CLAUDE_POOL_STATE"]
+        self.assertEqual(r.stdout, "echo:hi\n")
+        self.assertLess(took, 9)
+        self.assertEqual(self.probes(), [])
+        self.assertIn("refresh_skipped", [e["event"] for e in self.events()])
+
+    # --- parallel runs ----------------------------------------------------------------------------------------
+
+    def test_busy_account_near_the_margin_gets_no_second_run(self):
+        now = time.time()
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        rows = {"a": {"five_hour": 80, "resets_ts": now + 600, "seven_day": 40, "seven_day_resets_ts": now + 86400,
+                      "running": [{"pid": os.getpid(), "host": __import__("socket").gethostname(), "ts": now}]},
+                "b": {"five_hour": 10, "resets_ts": now + 600, "seven_day": 10, "seven_day_resets_ts": now + 5 * 86400}}
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")
+        rows["a"]["running"] = [{"pid": 999999999, "host": __import__("socket").gethostname(), "ts": now}]  # gone
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-a")
+
+    def test_running_mark_is_removed_after_the_run(self):
+        self.add("a", "tok-a")
+        self.run_pool("-p", "hi")
+        with open(self.state) as f:
+            self.assertEqual(json.load(f)["a"]["running"], [])
+
+    # --- alerts -----------------------------------------------------------------------------------------------
+
+    def test_alert_runs_once_an_hour_per_problem(self):
+        out = os.path.join(self.tmp, "alerts.txt")
+        script = os.path.join(self.tmp, "alert.py")
+        with open(script, "w") as f:
+            f.write("import os, sys\nopen(%r, 'a').write(os.environ['CLAUDE_POOL_EVENT'] + '|' + "
+                    "os.environ['CLAUDE_POOL_MESSAGE'] + '|' + sys.stdin.read()[:1] + '\\n')\n" % out)
+        self.add("a", "tok-a")
+        self.usage({"a": {"seven_day": 100, "seven_day_resets_ts": time.time() + 9999}})
+        cmd = f'"{sys.executable}" "{script}"'
+        for _ in range(2):
+            self.assertEqual(self.run_pool("-p", "hi", CLAUDE_POOL_ALERT=cmd).returncode, 75)
+        with open(out) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("exhausted|claude-pool on "))
+        self.assertTrue(lines[0].endswith("|{"))  # the event as JSON on stdin
+
+    # --- commands ---------------------------------------------------------------------------------------------
+
+    def test_help_lists_commands_and_settings(self):
+        r = self.run_pool("--pool-help")
+        for word in ("--pool-add", "--pool-check", "--pool-log", "CLAUDE_POOL_RERUN", "CLAUDE_POOL_ALERT", self.pool):
+            self.assertIn(word, r.stdout)
+
+    def test_unknown_pool_command_fails(self):
+        r = self.run_pool("--pool-nope")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--pool-help", r.stderr)
+
+    def test_add_writes_a_private_token_and_checks_it(self):
+        r = self.run_pool("--pool-add", "work", stdin="tok-work\n", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(self.pool, "work.token")
+        with open(path) as f:
+            self.assertEqual(f.read(), "tok-work\n")
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual([c["token"] for c in self.probes()], ["tok-work"])
+        self.assertIn("work", r.stdout)
+        self.assertNotEqual(self.run_pool("--pool-add", "work", stdin="x").returncode, 0)  # no overwrite
+        self.assertNotEqual(self.run_pool("--pool-add", "../evil", stdin="x").returncode, 0)
+
+    def test_add_api_key_becomes_key_file(self):
+        self.run_pool("--pool-add", "api", stdin="sk-ant-api03-xyz")
+        self.assertTrue(os.path.exists(os.path.join(self.pool, "api.key")))
+
+    def test_off_and_on(self):
+        self.add("a", "tok-a")
+        self.assertEqual(self.run_pool("--pool-off", "a").returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.pool, "a.token.off")))
+        self.assertNotEqual(self.run_pool("--pool-off", "a").returncode, 0)
+        self.assertEqual(self.run_pool("--pool-on", "a").returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.pool, "a.token")))
+
+    def test_log_shows_events(self):
+        self.add("a", "tok-a")
+        self.run_pool("-p", "hi")
+        r = self.run_pool("--pool-log", "5")
+        self.assertIn(" run ", r.stdout)
+        self.assertIn("account=a", r.stdout)
+
+    def test_check_passes_with_a_good_token(self):
+        self.add("a", "tok-a")
+        r = self.run_pool("--pool-check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("a: token works", r.stdout)
+
+    def test_check_fails_on_a_refused_token(self):
+        self.add("a", "bad-a")
+        r = self.run_pool("--pool-check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("token refused", r.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_world_readable_token_warns(self):
+        self.add("a", "tok-a")
+        os.chmod(os.path.join(self.pool, "a.token"), 0o644)
+        self.assertIn("can be read by every user", self.run_pool("--pool-status").stderr)
+        self.assertIn("WARN  a.token: every user can read it", self.run_pool("--pool-check").stdout)
 
 
 if __name__ == "__main__":
