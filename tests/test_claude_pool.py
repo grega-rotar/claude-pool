@@ -102,15 +102,56 @@ class PoolTest(unittest.TestCase):
         lines = [json.loads(l) for l in self.run_pool("-p", "hi", "--output-format", "stream-json", "--verbose").stdout.splitlines()]
         self.assertEqual([e["type"] for e in lines], ["system", "rate_limit_event", "result"])
 
-    def test_picks_lowest_weekly_usage_and_records_it(self):
+    def test_balance_picks_lowest_weekly_usage_and_records_it(self):
         self.add("a", "tok-a")
         self.add("b", "tok-b")
         self.usage({"a": {"seven_day": 60, "five_hour": 1}, "b": {"seven_day": 10, "five_hour": 90}})
-        self.run_pool("-p", "hi", FAKE_UTIL="0.4")
+        self.run_pool("-p", "hi", FAKE_UTIL="0.4", CLAUDE_POOL_STRATEGY="balance")
         self.assertEqual(self.calls()[0]["token"], "tok-b")
         with open(self.state) as f:
             row = json.load(f)["b"]
         self.assertEqual((row["five_hour"], row["seven_day"], row["runs"]), (40.0, 20.0, 1))
+
+    def test_drain_takes_soonest_weekly_reset(self):
+        now = time.time()
+        for n in "abc":
+            self.add(n, "tok-" + n)
+        self.usage({"a": {"seven_day": 80, "seven_day_resets_ts": now + 5 * 86400},
+                    "b": {"seven_day": 10, "seven_day_resets_ts": now + 86400}})  # c: never used
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[0]["token"], "tok-b")
+
+    def test_drain_same_reset_takes_most_used(self):
+        reset = time.time() + 86400
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 20, "seven_day_resets_ts": reset}, "b": {"seven_day": 70, "seven_day_resets_ts": reset}})
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[0]["token"], "tok-b")
+
+    def test_drain_keeps_unused_and_reset_accounts_for_last(self):
+        now = time.time()
+        self.add("fresh", "tok-fresh")
+        self.add("old", "tok-old")
+        self.add("live", "tok-live")
+        self.usage({"old": {"seven_day": 90, "seven_day_resets_ts": now - 60},
+                    "live": {"seven_day": 40, "seven_day_resets_ts": now + 6 * 86400}})
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[0]["token"], "tok-live")
+
+    def test_drain_moves_on_past_the_5h_margin_but_uses_it_as_last_resort(self):
+        now = time.time()
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        rows = {"a": {"seven_day": 50, "five_hour": 92, "resets_ts": now + 600, "seven_day_resets_ts": now + 86400},
+                "b": {"seven_day": 10, "five_hour": 5, "seven_day_resets_ts": now + 5 * 86400}}
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")
+        rows["b"].update(five_hour=95, resets_ts=now + 600)
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-a")
 
     def test_skips_account_at_limit(self):
         self.add("a", "tok-a")
@@ -122,7 +163,7 @@ class PoolTest(unittest.TestCase):
     def test_limit_cut_off_reruns_on_next_account_with_stdin_prompt(self):
         self.add("a", "limit-a")
         self.add("b", "tok-b")
-        self.usage({"b": {"seven_day": 5}})
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}, "b": {"seven_day": 5}})
         r = self.run_pool("-p", "--output-format", "json", stdin="piped prompt")
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
@@ -176,10 +217,10 @@ class PoolTest(unittest.TestCase):
     def test_status_lists_accounts(self):
         self.add("a", "tok-a")
         self.add("b", "tok-b")
-        self.usage({"a": {"seven_day": 30, "runs": 4}})
+        self.usage({"a": {"seven_day": 30, "runs": 4, "seven_day_resets_ts": time.time() + 86400}})
         r = self.run_pool("--pool-status")
         self.assertIn("b", r.stdout)
-        self.assertIn("<- next", [l for l in r.stdout.splitlines() if l.startswith("b ")][0])
+        self.assertIn("<- next", [l for l in r.stdout.splitlines() if l.startswith("a ")][0])
 
 
 if __name__ == "__main__":
