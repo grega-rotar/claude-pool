@@ -5,7 +5,7 @@ Drop-in for the Claude Code CLI: `claude-pool -p "hi" --output-format json` take
 the same output as `claude`. Before each run it picks a free account, and in print mode (-p) a run cut off by a
 usage limit is rerun at once on the next free account.
 
-Accounts: one file per account in $CLAUDE_POOL_DIR (default ~/.config/claude-pool):
+Accounts: one file per account in $CLAUDE_POOL_DIR (default ~/.config/claude-pool, on Windows %APPDATA%\claude-pool):
   <name>.token   an OAuth token from `claude setup-token` (Claude subscription)
   <name>.key     an Anthropic API key
 Rename a file to <name>.token.off to take the account out. The folder is reread on every run. With no files,
@@ -24,11 +24,9 @@ Other settings: CLAUDE_POOL_BINARY (the real claude, default `claude`), CLAUDE_P
 account), CLAUDE_POOL_LIMIT (percent of a window that counts as full, default 100).
 `claude-pool --pool-status` lists the accounts and their last known usage.
 """
-import fcntl
 import json
 import os
 import re
-import select
 import shutil
 import signal
 import subprocess
@@ -36,22 +34,70 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
-__version__ = "0.3.0"
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+
+__version__ = "0.4.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 
 
 def pool_dir():
-    return os.path.expanduser(os.environ.get("CLAUDE_POOL_DIR") or "~/.config/claude-pool")
+    if os.environ.get("CLAUDE_POOL_DIR"):
+        return os.path.expanduser(os.environ["CLAUDE_POOL_DIR"])
+    if WINDOWS:
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "claude-pool")
+    return os.path.expanduser("~/.config/claude-pool")
 
 
 def state_path():
     if os.environ.get("CLAUDE_POOL_STATE"):
         return os.path.expanduser(os.environ["CLAUDE_POOL_STATE"])
-    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    if WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(base, "claude-pool", "usage.json")
+
+
+@contextmanager
+def locked(path):
+    """An exclusive lock on `path` across processes, held for the with-block."""
+    with open(path, "a+") as f:
+        if not WINDOWS:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+            return
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:  # LK_LOCK gives up after about 10 s; keep waiting like flock does
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def replace(src, dst):
+    """os.replace, retried on Windows while another process has `dst` open for a moment."""
+    for _ in range(50):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if not WINDOWS:
+                raise
+            time.sleep(0.05)
+    os.replace(src, dst)
 
 
 def limit_pct():
@@ -158,8 +204,7 @@ def refresh(pool, names=None, stale_only=False):
         return
     path = state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path + ".refresh", "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    with locked(path + ".refresh"):
         binary = real_binary()
         threads = [threading.Thread(target=probe, args=(n, *pool[n], binary)) for n in due(load_usage())]
         for t in threads:
@@ -172,8 +217,7 @@ def record(name, info, ran=True, error=None):
     """Store one run's rate_limit_info for the account, under a lock so parallel callers lose no rows."""
     path = state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path + ".lock", "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    with locked(path + ".lock"):
         usage = load_usage()
         row = usage.setdefault(name, {})
         if info:
@@ -192,7 +236,7 @@ def record(name, info, ran=True, error=None):
             row["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with open(path + ".tmp", "w") as f:
             json.dump(usage, f, indent=1)
-        os.replace(path + ".tmp", path)  # whole, so a parallel caller never reads half a file
+        replace(path + ".tmp", path)  # whole, so a parallel caller never reads half a file
 
 
 def account_env(kind, secret):
@@ -249,17 +293,31 @@ def piped_stdin(wait=3.0):
     up when nothing arrives within `wait` seconds, so a caller that leaves stdin open without writing doesn't hang."""
     if sys.stdin is None or sys.stdin.isatty():
         return None
+    chunks, started, done = [], threading.Event(), threading.Event()
     fd = sys.stdin.fileno()
-    if not select.select([fd], [], [], wait)[0]:
+
+    def read():  # a thread, since select() can't wait on a pipe on Windows; raw reads, so exiting never blocks on it
+        while True:
+            chunk = os.read(fd, 65536)
+            started.set()
+            if not chunk:
+                break
+            chunks.append(chunk)
+        done.set()
+    threading.Thread(target=read, daemon=True).start()
+    if not started.wait(wait):
         return b""
-    return sys.stdin.buffer.read()
+    done.wait()
+    return b"".join(chunks)
 
 
 def run_once(cmd, env, data, live):
     """One claude run; returns (exit code, events). With `live`, each stream-json line is written out as it comes."""
     p = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE if data is not None else None, stdout=subprocess.PIPE)
-    forward = lambda sig, _f: p.send_signal(sig)  # noqa: E731  so a caller's terminate stops claude too
-    old = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    # So a caller's terminate stops claude too. Windows can only terminate a process, not signal it.
+    forward = lambda sig, _f: p.terminate() if WINDOWS else p.send_signal(sig)  # noqa: E731
+    sigs = [getattr(signal, s) for s in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, s)]
+    old = {s: signal.signal(s, forward) for s in sigs}
     try:
         if data is not None:
             try:
@@ -289,7 +347,8 @@ def emit(fmt, verbose, events, final):
     if fmt == "json":
         print(json.dumps(events if verbose else final))
     elif final.get("result") is not None:
-        print(final["result"])
+        sys.stdout.buffer.write((final["result"] + "\n").encode("utf-8"))  # as claude does, whatever the console
+        sys.stdout.flush()
 
 
 def run(args):
@@ -381,6 +440,8 @@ def main(argv=None):
     name = os.environ.get("CLAUDE_POOL_ACCOUNT") or choose(pool, load_usage())
     env = account_env(*pool[name]) if name in pool else dict(os.environ)
     binary = real_binary()
+    if WINDOWS:  # no real exec on Windows: run it and pass its exit code on
+        return subprocess.call([binary] + args, env=env)
     os.execve(binary, [binary] + args, env)
 
 
