@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -66,7 +66,9 @@ Commands:
   --pool-log [N]           the last N events (default 20): runs, switches, errors
   --pool-version           version
 
-Settings (environment variables, all optional):
+Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optional):
+  CLAUDE_POOL_ENV_FILE     .env to read          the nearest .env from the current folder up
+  CLAUDE_POOL_TOKEN_<NAME> an account's OAuth token instead of a file (CLAUDE_POOL_KEY_<NAME>: an API key)
   CLAUDE_POOL_DIR          account folder        {dir}
   CLAUDE_POOL_STATE        usage file            {state}
   CLAUDE_POOL_LOG          event log             {log}
@@ -81,6 +83,50 @@ Settings (environment variables, all optional):
   CLAUDE_POOL_ALERT        shell command run on problems, with CLAUDE_POOL_EVENT and CLAUDE_POOL_MESSAGE set
 
 Exit code 75: every account is full. More: https://github.com/grega-rotar/claude-pool"""
+
+
+ENV_ACCOUNT = re.compile(r"CLAUDE_POOL_(TOKEN|KEY)_(\w+)$")
+
+
+def load_dotenv():
+    """Settings and accounts from a .env file: CLAUDE_POOL_ENV_FILE, else the nearest .env from the current folder
+    up. Only CLAUDE_POOL_* lines are read, so an app's other secrets never reach claude. A variable that is
+    already set wins. Returns the file used, or None."""
+    path = os.environ.get("CLAUDE_POOL_ENV_FILE")
+    if path:
+        path = os.path.expanduser(path)
+    else:
+        d = os.getcwd()
+        while not os.path.isfile(os.path.join(d, ".env")):
+            if os.path.dirname(d) == d:
+                return None
+            d = os.path.dirname(d)
+        path = os.path.join(d, ".env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        if os.environ.get("CLAUDE_POOL_ENV_FILE"):
+            print(f"claude-pool: can't read {path} ({e.strerror})", file=sys.stderr)
+        return None
+    for line in lines:
+        m = re.match(r"\s*(?:export\s+)?(CLAUDE_POOL_\w+)\s*=\s*(.*)$", line)
+        if not m or m.group(1) in os.environ:
+            continue
+        value = m.group(2).strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            value = re.sub(r"\s+#.*$", "", value)
+        os.environ[m.group(1)] = value
+    return path
+
+
+def child_env(**extra):
+    """The environment for claude and alert commands: ours without the pool's account secrets."""
+    env = {k: v for k, v in os.environ.items() if not ENV_ACCOUNT.match(k)}
+    env.update(extra)
+    return env
 
 
 def env_num(name, default):
@@ -209,14 +255,25 @@ def alert(event, line):
             replace(path + ".tmp", path)
         msg = f"claude-pool on {HOST}: {line.get('message') or event}"
         subprocess.run(cmd, shell=True, input=json.dumps(line), text=True, timeout=15, capture_output=True,
-                       env=dict(os.environ, CLAUDE_POOL_EVENT=event, CLAUDE_POOL_MESSAGE=msg))
+                       env=child_env(CLAUDE_POOL_EVENT=event, CLAUDE_POOL_MESSAGE=msg))
     except (OSError, subprocess.SubprocessError):
         pass
 
 
+def env_accounts():
+    """{name: (kind, secret)} for every CLAUDE_POOL_TOKEN_<NAME> / CLAUDE_POOL_KEY_<NAME> variable (or .env line)."""
+    out = {}
+    for k, v in sorted(os.environ.items()):
+        m = ENV_ACCOUNT.match(k)
+        if m and v.strip():
+            out[m.group(2).lower().replace("_", "-")] = ("token" if m.group(1) == "TOKEN" else "key", v.strip())
+    return out
+
+
 def accounts(warn=False):
-    """{name: (kind, secret)} for every <name>.token / <name>.key in the pool folder."""
-    out, d = {}, pool_dir()
+    """{name: (kind, secret)} for every <name>.token / <name>.key in the pool folder, plus the accounts set in
+    variables. A file wins over a variable with the same name."""
+    out, d = env_accounts(), pool_dir()
     if not os.path.isdir(d):
         return out
     try:
@@ -450,7 +507,7 @@ def record(name, info, ran=True, error=None):
 
 
 def account_env(kind, secret):
-    env = dict(os.environ)
+    env = child_env()
     if kind == "token":
         env["CLAUDE_CODE_OAUTH_TOKEN"] = secret
         env.pop("ANTHROPIC_API_KEY", None)  # an API key would win over the token and bill the API instead
@@ -602,7 +659,7 @@ def run(args):
         print(msg, file=sys.stderr)
         return EXIT_EXHAUSTED
     while True:
-        env = account_env(*pool[name]) if name else dict(os.environ)
+        env = account_env(*pool[name]) if name else child_env()
         if name:
             mark_running(name, True)
         try:
@@ -770,8 +827,14 @@ def check():
     except OSError as e:
         say("FAIL", f"account folder {d}: {e.strerror}; for a shared pool, add this user to the folder's group")
         return 1
+    env_file = load_dotenv()
+    if env_file:
+        say("OK", f"settings from {env_file}")
+    if env_accounts():
+        say("OK", "accounts from variables: " + ", ".join(env_accounts()))
     if files is None:
-        say("WARN", f"no account folder {d}; claude runs with the normal login (add one: claude-pool --pool-add <name>)")
+        if not env_accounts():
+            say("WARN", f"no account folder {d}; claude runs with the normal login (add one: claude-pool --pool-add <name>)")
     else:
         say("OK", f"account folder {d}")
         for f in files:
@@ -809,6 +872,7 @@ def check():
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    load_dotenv()
     cmd, rest = (args[0], args[1:]) if args else (None, [])
     if cmd == "--pool-help":
         print(HELP.format(version=__version__, dir=pool_dir(), state=state_path(), log=log_path()))
@@ -838,7 +902,7 @@ def main(argv=None):
     if not os.environ.get("CLAUDE_POOL_ACCOUNT") and fresh_secs() > 0:
         refresh(pool, stale_only=True)
     name = os.environ.get("CLAUDE_POOL_ACCOUNT") or choose(pool, load_usage())
-    env = account_env(*pool[name]) if name in pool else dict(os.environ)
+    env = account_env(*pool[name]) if name in pool else child_env()
     binary = real_binary()
     if name in pool:
         mark_running(name, True)  # exec keeps our pid, so the mark lives as long as the session

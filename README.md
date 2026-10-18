@@ -114,7 +114,7 @@ export CLAUDE_POOL_ALERT='curl -s -X POST -H "Content-Type: application/json" -d
 
 ## Settings
 
-You don't need to change anything. If you want to, set these as environment variables.
+You don't need to change anything. If you want to, set these as environment variables or in a `.env` file (see [In a .env file](#in-a-env-file)).
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -130,6 +130,9 @@ You don't need to change anything. If you want to, set these as environment vari
 | `CLAUDE_POOL_RERUN` | `safe` | After a limit cut-off: `safe` (only if no tools ran), `always` or `never` |
 | `CLAUDE_POOL_ALERT` | none | Command to run on problems (see [Log and alerts](#log-and-alerts)) |
 | `CLAUDE_POOL_LOG` | next to the usage file | Event log |
+| `CLAUDE_POOL_ENV_FILE` | the nearest `.env` from the current folder up | `.env` file to read |
+| `CLAUDE_POOL_TOKEN_<NAME>` | none | An account's OAuth token, instead of a `<name>.token` file |
+| `CLAUDE_POOL_KEY_<NAME>` | none | An account's API key, instead of a `<name>.key` file |
 
 ### Where to set them
 
@@ -144,6 +147,23 @@ Set them where the app that calls `claude-pool` runs. Services don't read your s
 | PHP-FPM | `env[CLAUDE_POOL_FRESH] = 600` in the pool config (`www.conf`), then restart PHP-FPM |
 | Docker | `environment:` in `docker-compose.yml`, or `-e CLAUDE_POOL_FRESH=600` |
 | One command | `CLAUDE_POOL_ACCOUNT=work claude-pool -p "hi"` |
+| Laravel or any app with a `.env` | Add the lines to the app's `.env` (next section) |
+
+### In a .env file
+
+claude-pool reads the nearest `.env` from the folder it runs in, going up (so a Laravel app that runs it from `public/` still finds the app's `.env`). Set `CLAUDE_POOL_ENV_FILE` to read another file.
+
+```sh
+CLAUDE_POOL_TOKEN_WORK=sk-ant-oat01-...
+CLAUDE_POOL_TOKEN_SPARE=sk-ant-oat01-...
+CLAUDE_POOL_FRESH=600
+```
+
+- Only `CLAUDE_POOL_*` lines are read. The app's other secrets (`APP_KEY`, database passwords) are never passed to claude.
+- `CLAUDE_POOL_TOKEN_<NAME>` adds account `<name>`: `CLAUDE_POOL_TOKEN_WORK_2` is `work-2`. The tokens are taken out of the environment claude runs in.
+- A variable that is already set wins over the `.env`, and a `<name>.token` file wins over a variable with the same name.
+- Laravel's `config:cache` doesn't matter: claude-pool reads the file itself.
+- `claude-pool --pool-check` shows which `.env` it used and which accounts came from it.
 
 ## Several users on one server
 

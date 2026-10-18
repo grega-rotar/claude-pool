@@ -19,7 +19,7 @@ args = sys.argv[1:]
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
 os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
 with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
-    f.write(json.dumps({"args": args, "token": tok}))
+    f.write(json.dumps({"args": args, "token": tok, "pool_secrets": sorted(k for k in os.environ if k.startswith(("CLAUDE_POOL_TOKEN_", "CLAUDE_POOL_KEY_")))}))
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
@@ -74,9 +74,9 @@ class PoolTest(unittest.TestCase):
         with open(self.state, "w") as f:
             json.dump(rows, f)
 
-    def run_pool(self, *args, stdin=None, **env):
+    def run_pool(self, *args, stdin=None, cwd=None, **env):
         return subprocess.run([sys.executable, POOL, *args], capture_output=True, text=True, input=stdin,
-                              env={**self.env, **env}, timeout=30)
+                              env={**self.env, **env}, timeout=30, cwd=cwd or self.tmp)
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -504,6 +504,48 @@ class PoolTest(unittest.TestCase):
         os.chmod(os.path.join(self.pool, "a.token"), 0o644)
         self.assertIn("can be read by every user", self.run_pool("--pool-status").stderr)
         self.assertIn("WARN  a.token: every user can read it", self.run_pool("--pool-check").stdout)
+
+
+    def write_env(self, folder, text):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, ".env"), "w") as f:
+            f.write(text)
+
+    def test_account_from_variable_and_its_secret_stays_out_of_claude(self):
+        self.run_pool("-p", "hi", CLAUDE_POOL_TOKEN_WORK_2="tok-w")
+        c = self.calls()[0]
+        self.assertEqual((c["token"], c["pool_secrets"]), ("tok-w", []))
+        self.assertIn("work-2", self.run_pool("--pool-status", CLAUDE_POOL_TOKEN_WORK_2="tok-w").stdout)
+
+    def test_file_wins_over_variable_with_the_same_name(self):
+        self.add("work", "tok-file")
+        self.run_pool("-p", "hi", CLAUDE_POOL_TOKEN_WORK="tok-var")
+        self.assertEqual(self.calls()[0]["token"], "tok-file")
+
+    def test_dotenv_from_a_parent_folder(self):
+        app = os.path.join(self.tmp, "app")
+        self.write_env(app, "APP_KEY=secret\nDB_PASSWORD=x\n"
+                            "export CLAUDE_POOL_TOKEN_MAIN=\"tok-env\"\nCLAUDE_POOL_ACCOUNT=main  # pinned\n")
+        os.makedirs(os.path.join(app, "public"))
+        self.run_pool("-p", "hi", cwd=os.path.join(app, "public"))
+        c = self.calls()[0]
+        self.assertEqual((c["token"], c["pool_secrets"]), ("tok-env", []))
+
+    def test_dotenv_only_reads_pool_lines_and_real_variables_win(self):
+        self.write_env(self.tmp, "CLAUDE_CODE_OAUTH_TOKEN=tok-app\nCLAUDE_POOL_ACCOUNT=nope\n")
+        self.add("a", "tok-a")
+        self.run_pool("-p", "hi", CLAUDE_POOL_ACCOUNT="a")
+        self.assertEqual(self.calls()[0]["token"], "tok-a")
+        os.remove(os.path.join(self.pool, "a.token"))
+        self.write_env(self.tmp, "CLAUDE_CODE_OAUTH_TOKEN=tok-app\n")
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[1]["token"], "login")
+
+    def test_dotenv_file_setting(self):
+        conf = os.path.join(self.tmp, "conf")
+        self.write_env(conf, "CLAUDE_POOL_KEY_API='sk-9'\n")
+        self.run_pool("-p", "hi", CLAUDE_POOL_ENV_FILE=os.path.join(conf, ".env"))
+        self.assertEqual(self.calls()[0]["token"], "key:sk-9")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0
+
+- **.env support:** settings and accounts can live in a `.env` file, the nearest one from the current folder up or `CLAUDE_POOL_ENV_FILE`. Only `CLAUDE_POOL_*` lines are read; a variable that is already set wins.
+- **Accounts in variables:** `CLAUDE_POOL_TOKEN_<NAME>` and `CLAUDE_POOL_KEY_<NAME>` add accounts without files. They are taken out of the environment claude and alert commands run in.
+
 ## 0.5.0
 
 - **Safe reruns:** a run cut off by a limit is rerun only if it used no tools yet, so nothing happens twice. `CLAUDE_POOL_RERUN=always|never` changes this.
