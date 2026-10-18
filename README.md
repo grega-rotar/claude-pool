@@ -28,11 +28,15 @@ claude-pool --pool-status
 
 ## How it picks
 
-1. The account whose weekly window resets soonest (its unused room expires first).
-2. Past 90% of a 5-hour window, the next account.
-3. Unused accounts last.
+It uses up the account whose week ends soonest, because leftover usage is lost at the reset. When that account's 5-hour window is at 90%, it moves to the next one. Fresh accounts are saved for last.
 
-If a limit cuts off a `-p` run, it reruns on the next account. If every account is full, it exits with code 75. JSON output gets `pool_account` and `pool_switched`.
+If a run hits a limit, it starts over on the next account. If every account is full, it exits with code 75.
+
+## Cost
+
+- **Usage:** none extra. It reads usage from the output Claude already prints.
+- **Time:** about 60 ms per call.
+- **Reruns:** a run cut off by a limit is wasted, since it starts again from scratch.
 
 ## Settings
 
@@ -48,7 +52,6 @@ If a limit cuts off a `-p` run, it reruns on the next account. If every account 
 
 ## Notes
 
-- A rerun starts the task over, so its tool calls run again.
 - Using several accounts to get around usage limits breaks Anthropic's terms.
 
 MIT
