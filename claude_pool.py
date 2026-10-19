@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -271,6 +271,11 @@ def env_accounts():
     return out
 
 
+def shown(pool):
+    """The accounts to show and check: with none set up, the normal claude login as one row named "login"."""
+    return pool or {"login": ("login", None)}
+
+
 def accounts(warn=False):
     """{name: (kind, secret)} for every <name>.token / <name>.key in the pool folder, plus the accounts set in
     variables. A file wins over a variable with the same name."""
@@ -446,6 +451,9 @@ def probe(name, kind, secret, binary):
         record(name, info, ran=False)
         return "ok"
     error = str(final.get("result") or err.strip() or "no reply")[:300]
+    if final.get("subtype") == "success" and kind == "login":  # logged in with an API key: no usage windows
+        touch(name)
+        return "no_usage"
     if final.get("subtype") == "success":
         # claude ran but printed no usage: the CLI's output has changed, so picks would be blind.
         touch(name)
@@ -466,7 +474,7 @@ def refresh(pool, names=None, stale_only=False):
     then go on with the old ones. Returns {name: result}."""
     def due(usage):
         now = time.time()
-        return [n for n, (kind, _) in pool.items() if kind == "token" and (names is None or n in names)
+        return [n for n, (kind, _) in pool.items() if kind in ("token", "login") and (names is None or n in names)
                 and (not stale_only or now - ((usage.get(n) or {}).get("checked_ts") or 0) >= fresh_secs())]
     if not due(load_usage()):
         return {}
@@ -509,6 +517,8 @@ def record(name, info, ran=True, error=None):
 
 def account_env(kind, secret):
     env = child_env()
+    if kind == "login":  # the normal claude login: no secret of ours
+        return env
     if kind == "token":
         env["CLAUDE_CODE_OAUTH_TOKEN"] = secret
         env.pop("ANTHROPIC_API_KEY", None)  # an API key would win over the token and bill the API instead
@@ -715,10 +725,7 @@ def parse_events(events):
 
 
 def status():
-    pool, usage = accounts(warn=True), load_usage()
-    if not pool:
-        print(f"no accounts in {pool_dir()} (claude runs with your normal login)")
-        return 0
+    pool, usage = shown(accounts(warn=True)), load_usage()
     now = time.time()
     fmt_ts = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "-"  # noqa: E731
     best = choose(pool, usage)
@@ -742,7 +749,7 @@ def watch(minutes):
     wait = max(60, int(minutes * 60))
     try:
         while True:
-            refresh(accounts())
+            refresh(shown(accounts()))
             if sys.stdout.isatty():
                 print("\033[H\033[2J", end="")  # clear the screen
             status()
@@ -900,7 +907,7 @@ def main(argv=None):
     if cmd == "--pool-status":
         return status()
     if cmd == "--pool-refresh":
-        refresh(accounts(), names=rest or None)
+        refresh(shown(accounts()), names=rest or None)
         return status()
     if cmd == "--pool-watch":
         try:

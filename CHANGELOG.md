@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- **Usage without accounts:** with no accounts set up, `--pool-status`, `--pool-refresh` and `--pool-watch` show the normal claude login as a row named `login`, with its usage.
+
 ## 0.7.0
 
 - **Live usage:** `--pool-watch [minutes]` checks every account and redraws the table every 5 minutes (or the minutes given, at least 1) until Ctrl+C.
