@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -673,6 +673,8 @@ def run(args):
         env = account_env(*pool[name]) if name else child_env()
         if name:
             mark_running(name, True)
+            if fmt == "stream-json":  # stream output can't get pool_account added at the end: say it up front
+                print(json.dumps({"type": "system", "subtype": "pool_account", "account": name}), flush=True)
         try:
             code, events = run_once(cmd, env, data, live=fmt == "stream-json")
         finally:

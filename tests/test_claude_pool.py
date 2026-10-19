@@ -127,7 +127,8 @@ class PoolTest(unittest.TestCase):
     def test_stream_json_passes_through(self):
         self.add("a", "tok-a")
         lines = [json.loads(l) for l in self.run_pool("-p", "hi", "--output-format", "stream-json", "--verbose").stdout.splitlines()]
-        self.assertEqual([e["type"] for e in lines], ["system", "rate_limit_event", "result"])
+        self.assertEqual([e["type"] for e in lines], ["system", "system", "rate_limit_event", "result"])
+        self.assertEqual(lines[0], {"type": "system", "subtype": "pool_account", "account": "a"})
 
     def test_balance_picks_lowest_weekly_usage_and_records_it(self):
         self.add("a", "tok-a")
