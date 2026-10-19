@@ -283,6 +283,26 @@ class PoolTest(unittest.TestCase):
         self.assertIn("50.0", r.stdout)
         self.assertIn("0m ago", r.stdout)
 
+    def test_pool_watch_refreshes_and_keeps_going(self):
+        self.add("a", "tok-a")
+        p = subprocess.Popen([sys.executable, POOL, "--pool-watch", "1"], stdout=subprocess.PIPE, text=True,
+                             env={**self.env, "FAKE_UTIL": "0.5"}, cwd=self.tmp)
+        try:
+            out = "".join(p.stdout.readline() for _ in range(4))  # header, account, blank, "next check"
+            self.assertIsNone(p.poll())  # still waiting for the next check
+        finally:
+            p.kill()
+            p.wait()
+            p.stdout.close()
+        self.assertIn("50.0", out)
+        self.assertIn("next check in 1 min", out)
+        self.assertEqual(len(self.probes()), 1)
+
+    def test_pool_watch_rejects_bad_minutes(self):
+        r = self.run_pool("--pool-watch", "soon")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("minutes between checks", r.stderr)
+
     @unittest.skipIf(os.name == "nt", "POSIX permissions")
     def test_shared_folder_files_are_group_writable(self):
         shared = os.path.join(self.tmp, "shared")

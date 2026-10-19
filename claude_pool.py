@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -58,6 +58,7 @@ Commands:
   --pool-help              this help
   --pool-status            accounts with their usage; "<- next" is used next
   --pool-refresh [name..]  check usage of every account (or the named ones) now
+  --pool-watch [minutes]   --pool-refresh every few minutes (default 5) until Ctrl+C
   --pool-check             check the setup: claude, folders, permissions, every token
   --pool-add <name>        add an account; paste the token from `claude setup-token`
                            (or pipe it: echo "$TOKEN" | claude-pool --pool-add work)
@@ -736,6 +737,22 @@ def status():
     return 0
 
 
+def watch(minutes):
+    """--pool-refresh again and again. Every check is a tiny Haiku call per account, so the wait is at least a minute."""
+    wait = max(60, int(minutes * 60))
+    try:
+        while True:
+            refresh(accounts())
+            if sys.stdout.isatty():
+                print("\033[H\033[2J", end="")  # clear the screen
+            status()
+            print(f"\nchecked {time.strftime('%H:%M')}, next check in {wait // 60} min. Ctrl+C to stop.", flush=True)
+            time.sleep(wait)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
 def valid_name(name):
     if not name or not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name.startswith("."):
         sys.exit("claude-pool: an account name may use letters, digits, dot, dash and underscore")
@@ -885,6 +902,11 @@ def main(argv=None):
     if cmd == "--pool-refresh":
         refresh(accounts(), names=rest or None)
         return status()
+    if cmd == "--pool-watch":
+        try:
+            return watch(float(rest[0]) if rest else 5)
+        except ValueError:
+            sys.exit("claude-pool: --pool-watch takes the minutes between checks, e.g. --pool-watch 10")
     if cmd == "--pool-check":
         return check()
     if cmd == "--pool-add":
