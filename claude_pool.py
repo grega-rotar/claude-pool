@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -86,6 +86,7 @@ Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optio
   CLAUDE_POOL_RERUN        after a limit cut-off: safe (only if no tools ran), always, never (safe)
   CLAUDE_POOL_SWITCH       off = an interactive session stays on its first account (on)
   CLAUDE_POOL_RESUME_PROMPT what a switched session is told first; empty = nothing, wait for you
+  CLAUDE_POOL_BANNER       off = no pool line under the prompt in interactive sessions (on)
   CLAUDE_POOL_ORCA         Orca's logins: auto (interactive sessions and --pool-* commands), on (print mode
                            too), off, or the path of Orca's data folder (as on) (auto)
   CLAUDE_POOL_ALERT        shell command run on problems, with CLAUDE_POOL_EVENT and CLAUDE_POOL_MESSAGE set
@@ -948,12 +949,16 @@ def resume_args(args, spec, session, prompt):
     return keep + ["--resume", session] + ([prompt] if prompt else [])
 
 
-def with_hook(args, spec, settings_path, hook_file):
-    """The args with our StopFailure hook added through --settings, merged into the caller's own --settings."""
-    hook_cmd = " ".join(f'"{p}"' for p in (sys.executable, os.path.abspath(__file__)))
-    hook_cmd += f' --pool-hook "{hook_file}"'
-    if WINDOWS:  # claude runs hooks in a POSIX shell (Git Bash) there: forward slashes stay paths
-        hook_cmd = hook_cmd.replace("\\", "/")
+def self_cmd(*args):
+    """A shell command that runs claude-pool with `args`, for claude to call (hooks, status line)."""
+    cmd = " ".join(f'"{p}"' for p in (sys.executable, os.path.abspath(__file__), *args))
+    return cmd.replace("\\", "/") if WINDOWS else cmd  # claude runs them in Git Bash there: forward slashes
+
+
+def with_hook(args, spec, settings_path, hook_file, banner_dir=None):
+    """The args with our StopFailure hook added through --settings, merged into the caller's own --settings. With
+    `banner_dir`, the status line becomes ours too: it runs the one it replaces first (saved in that folder)."""
+    hook_cmd = self_cmd("--pool-hook", hook_file)
     settings, out = {}, []
     for f, values in split_args(args, spec):
         if f and f.split("=", 1)[0] == "--settings":
@@ -970,9 +975,117 @@ def with_hook(args, spec, settings_path, hook_file):
         out += ([f] if f else []) + values
     hooks = settings.setdefault("hooks", {})
     hooks["StopFailure"] = list(hooks.get("StopFailure") or []) + [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+    if banner_dir:
+        if (settings.get("statusLine") or {}).get("command"):
+            with open(os.path.join(banner_dir, "statusline.json"), "w", encoding="utf-8") as fh:
+                json.dump(settings["statusLine"], fh)
+        settings["statusLine"] = {"type": "command", "command": self_cmd("--pool-statusline", banner_dir)}
     with open(settings_path, "w", encoding="utf-8") as fh:
         json.dump(settings, fh)
     return ["--settings", settings_path] + out, settings
+
+
+def outer_statusline(folder, data, raw):
+    """The output of the status line ours stands in for (Orca's, yours): from --settings, else the settings files
+    in claude's order. Run with the same input, so it keeps working (Orca reads usage from it)."""
+    line = None
+    try:
+        with open(os.path.join(folder, "statusline.json"), encoding="utf-8") as f:
+            line = json.load(f)
+    except (OSError, ValueError):
+        proj = (data.get("workspace") or {}).get("project_dir") or data.get("cwd") or os.getcwd()
+        conf = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+        for path in (os.path.join(proj, ".claude", "settings.local.json"), os.path.join(proj, ".claude", "settings.json"),
+                     os.path.join(conf, "settings.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    line = json.load(f).get("statusLine")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if line:
+                break
+    cmd = (line or {}).get("command") if isinstance(line, dict) else None
+    if not cmd or "--pool-statusline" in cmd:
+        return ""
+    bash = WINDOWS and (os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash"))
+    try:
+        r = subprocess.run([bash, "-c", cmd] if bash else cmd, shell=not bash, input=raw, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.rstrip("\n")
+
+
+def live_usage(name, rate_limits):
+    """Save the usage claude hands the status line after each reply, so the pool knows it without a check."""
+    five, week = rate_limits.get("five_hour") or {}, rate_limits.get("seven_day") or {}
+    new = {k: v for k, v in (("five_hour", five.get("used_percentage")), ("resets_ts", five.get("resets_at")),
+                             ("seven_day", week.get("used_percentage")), ("seven_day_resets_ts", week.get("resets_at")))
+           if isinstance(v, (int, float))}
+    if not new:
+        return
+    old = load_usage().get(name) or {}
+    if all(old.get(k) == v for k, v in new.items()) and time.time() - (old.get("checked_ts") or 0) < 60:
+        return  # nothing new: the status line runs often, the usage file needn't change each time
+    with usage_update() as usage:
+        row = usage.setdefault(name, {})
+        row.update(new, checked_ts=time.time())
+        if new.get("five_hour", 0) < env_num("CLAUDE_POOL_LIMIT", 100) and row.get("status") == "rejected":
+            row["status"] = "allowed"
+
+
+def banner(session, data, color=True):
+    """The pool line under claude's prompt: the account, its 5-hour use and reset, the week when known, and the
+    account it moves to at the limit. Dim, with the 5-hour use yellow past CLAUDE_POOL_SWITCH_AT and a red warning
+    when there is no account left to move to."""
+    name, pool, now = session["account"], session.get("pool") or {}, time.time()
+    rl = data.get("rate_limits") or {}
+    if rl:
+        live_usage(name, rl)
+    usage = load_usage()
+    row = usage.get(name) or {}
+    clock = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
+    pieces = [("2", f"pool: {name}")]  # (color, text), joined by dim dots
+    five, reset = row.get("five_hour"), row.get("resets_ts") or 0
+    if five is not None and reset > now:
+        pieces += [("33" if five >= env_num("CLAUDE_POOL_SWITCH_AT", 90) else "2", f"{five:.0f}%"),
+                   ("2", f"resets {clock(reset)}")]
+    elif five is not None:  # the 5-hour window has reset since
+        pieces.append(("2", "0%"))
+    if row.get("seven_day") is not None and (row.get("seven_day_resets_ts") or 0) > now:
+        pieces.append(("2", f"week {row['seven_day']:.0f}%"))
+    here = (pool.get(name) or {}).get("sessions")
+    others = {n: (v.get("kind"), None) for n, v in pool.items() if v.get("sessions") == here}
+    nxt = choose(others, usage, skip={name}, now=now)
+    if nxt:
+        n5 = five_hour(usage.get(nxt) or {}, now)
+        pieces.append(("2", f"next: {nxt}" + (f" {n5:.0f}%" if n5 else "")))
+    else:
+        resets = [r for r in (at_limit(usage.get(n) or {}, now) for n in others if n != name) if r]
+        pieces.append(("31", "⚠ no next account" + (f" until {clock(min(resets))}" if resets else "")))
+    if not color:
+        return " · ".join(t for _, t in pieces)
+    return "\033[2m · \033[0m".join(f"\033[{c}m{t}\033[0m" for c, t in pieces)
+
+
+def statusline(folder):
+    """--pool-statusline <folder>: claude's status line in a claude-pool session."""
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        data = {}
+    lines = [outer_statusline(folder, data, raw)]
+    try:
+        with open(os.path.join(folder, "session.json"), encoding="utf-8") as f:
+            lines.append(banner(json.load(f), data, color=os.environ.get("NO_COLOR") is None))
+    except (OSError, ValueError, KeyError):
+        pass
+    out = "\n".join(x for x in lines if x)
+    if out:  # UTF-8 whatever the console, as claude reads it (a Windows pipe would get the old code page)
+        sys.stdout.buffer.write((out + "\n").encode("utf-8"))
+        sys.stdout.flush()
+    return 0
 
 
 def hooks_run():
@@ -1088,7 +1201,9 @@ def interactive(args, pool, name, binary, spec):
     stops it. Returns claude's exit code."""
     tmp = tempfile.mkdtemp(prefix="claude-pool-")
     hook_file = os.path.join(tmp, "stop-failure.json")
-    args, settings = with_hook(args, spec, os.path.join(tmp, "settings.json"), hook_file)
+    banner = os.environ.get("CLAUDE_POOL_BANNER", "on") != "off"
+    args, settings = with_hook(args, spec, os.path.join(tmp, "settings.json"), hook_file, tmp if banner else None)
+    shares = {n: {"kind": k, "sessions": sessions_dir(k, v)} for n, (k, v) in pool.items()}
     if settings.get("disableAllHooks"):
         print("claude-pool: your --settings turn hooks off; this session can't switch accounts", file=sys.stderr)
     prompt = os.environ.get("CLAUDE_POOL_RESUME_PROMPT", RESUME_PROMPT)
@@ -1111,6 +1226,10 @@ def interactive(args, pool, name, binary, spec):
         while True:
             mark_running(name, True)
             log("session", account=name, resumed=switches > 0)
+            if banner:  # what the status line shows: this session's account and the accounts it could move to
+                with open(os.path.join(tmp, "session.json.tmp"), "w", encoding="utf-8") as fh:
+                    json.dump({"account": name, "pool": shares}, fh)
+                replace(os.path.join(tmp, "session.json.tmp"), os.path.join(tmp, "session.json"))
             p = subprocess.Popen([binary] + args, env=account_env(*pool[name]), cwd=cwd)
             nxt = None
             while p.poll() is None:
@@ -1369,6 +1488,8 @@ def main(argv=None):
     cmd, rest = (args[0], args[1:]) if args else (None, [])
     if cmd == "--pool-hook":  # first: claude waits on it, so no .env or account reads
         return hook(rest[0]) if rest else 1
+    if cmd == "--pool-statusline":
+        return statusline(rest[0]) if rest else 0
     load_dotenv()
     if cmd == "--pool-help":
         print(HELP.format(version=__version__, dir=pool_dir(), state=state_path(), log=log_path()))

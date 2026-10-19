@@ -40,6 +40,21 @@ Ctrl+C goes to claude, not claude-pool. Closing the terminal or a `kill` reaches
 - Switching needs hooks. It does nothing under `--bare`, `--safe-mode`, `disableAllHooks`, or a managed policy that allows only managed hooks. Those sessions run normally on one account.
 - To keep a session on one account, set `CLAUDE_POOL_ACCOUNT=work`. To keep picking but never switch, set `CLAUDE_POOL_SWITCH=off`.
 
+### The status line
+
+Each claude-pool session gets one line under the prompt:
+
+```
+pool: editors2 · 85% · resets 23:10 · week 40% · next: factory 12%
+```
+
+- **The account** the session runs on now.
+- **Its 5-hour use**, in yellow from 90% (`CLAUDE_POOL_SWITCH_AT`), and when that window resets. The week shows up when the account has a weekly window.
+- **Next:** the account the session would move to at the limit, with its own 5-hour use. It's the same pick a switch would make, from the accounts that can see this conversation.
+- **Red ⚠ no next account until 20:20** when every other account is full or broken. The time is when the first one frees up.
+
+The numbers are the live ones Claude Code hands its status line after every reply, and claude-pool saves them, so `--pool-status` and other sessions see them too. Any status line you already had, Orca's included, still runs first, with the same input, and its output stays above the pool line. `CLAUDE_POOL_BANNER=off` turns the line off; `NO_COLOR` leaves out the colors.
+
 ## Print mode (`-p`)
 
 - **Limits:** a run cut off by a limit is rerun on the next account, but only if it hadn't used tools yet, so nothing happens twice (`CLAUDE_POOL_RERUN`).
