@@ -4,6 +4,7 @@
 
 - **Usage:** each print-mode run reports the account's usage and claude-pool saves it. Numbers older than 5 minutes are rechecked with a tiny Haiku call (~$0.0001), so other apps' use counts too.
 - **Order:** it uses the account whose week resets soonest first, since leftover usage is lost at the reset. At 90% of the 5-hour limit it moves on. Unused accounts go last.
+- **Your own login first:** when the caller's claude folder is one of the pool's accounts (an Orca pane on its account), that account goes first while it's under 90%.
 - **Busy accounts:** past 75% of its 5-hour window, an account that's already running something gets no second run while another has room.
 
 ## Interactive sessions
@@ -16,7 +17,7 @@ When a turn ends on an error, the hook hands the error to claude-pool:
 2. **Refused** (token revoked, org access off, account on hold, no credit): the account is marked broken and skipped until it's rechecked.
 3. **Anything else**, such as a short rate limit or an overloaded API: nothing happens. claude retries on its own.
 
-For 1 and 2, claude-pool picks the next free account and stops claude (SIGTERM, so claude saves the conversation and restores the terminal). Then it starts it again on the new account:
+For 1 and 2, claude-pool picks the next free account that can see the same conversation. With Orca that's every account; a `.dir` account counts only if its folder shares `projects/`. That account's usage is checked again first, unless it was checked in the last minute, so a session never moves to an account that is full too. This matters when one account is in the pool twice, as a token and in Orca. Then claude-pool stops claude (SIGTERM, so claude saves the conversation and restores the terminal). Then it starts it again on the new account:
 
 ```
 claude <your flags> --resume <session id> "Continue where you left off. Your last turn was cut off by a usage limit."
