@@ -1,5 +1,11 @@
 # Servers
 
+## One server, one user
+
+Same as on your laptop: install it and add accounts as that user. A systemd service or cron job that calls `claude-pool` instead of `claude` needs nothing else. New token files count on the next run, so no restart.
+
+If claude-pool isn't on the service's `PATH`, call it by its full path: `~/.local/bin/claude-pool`.
+
 ## One pool for several users
 
 So `www-data`, `deploy` and you share the same accounts and usage:
@@ -30,6 +36,4 @@ Copy the same token files to each server. Each sees the others' use at the 5-min
 
 ## Windows
 
-```powershell
-py -m pip install --user https://github.com/grega-rotar/claude-pool/archive/refs/heads/main.zip
-```
+Install it as the README says. A Windows service user needs Python and Claude Code on its own `PATH`.

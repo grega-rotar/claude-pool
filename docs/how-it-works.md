@@ -30,6 +30,15 @@ claude <your flags> --resume <session id> "Continue where you left off. Your las
 
 Ctrl+C goes to claude, not claude-pool. Closing the terminal or a `kill` reaches claude too.
 
+### What to expect on a switch
+
+- The session restarts on the new account in about two seconds, and prints a line naming it.
+- Anything you had typed or queued in the prompt box at that moment is lost. Background tasks the session started are stopped.
+- The first turn after a switch costs more, since the new account has no prompt cache yet.
+- When claude exits it prints `claude --resume <id>`. Run `claude-pool --resume <id>` to stay in the pool.
+- Switching needs hooks. It does nothing under `--bare`, `--safe-mode`, `disableAllHooks`, or a managed policy that allows only managed hooks. Those sessions run normally on one account.
+- To keep a session on one account, set `CLAUDE_POOL_ACCOUNT=work`. To keep picking but never switch, set `CLAUDE_POOL_SWITCH=off`.
+
 ## Print mode (`-p`)
 
 - **Limits:** a run cut off by a limit is rerun on the next account, but only if it hadn't used tools yet, so nothing happens twice (`CLAUDE_POOL_RERUN`).

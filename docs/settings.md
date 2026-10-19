@@ -21,6 +21,14 @@ All optional. Set them as environment variables or as lines in a `.env`.
 | `CLAUDE_POOL_ALERT` | | Command run on problems, gets `$CLAUDE_POOL_MESSAGE` |
 | `CLAUDE_POOL_LOG` | next to the usage file | Event log |
 
+## Where to set them
+
+Set it where the caller runs:
+
+- a shell: `export CLAUDE_POOL_SWITCH_AT=80`, or add it to `~/.bashrc`
+- one project: a `CLAUDE_POOL_SWITCH_AT=80` line in its `.env`
+- a systemd service: `Environment=CLAUDE_POOL_SWITCH_AT=80`, or a line in its `EnvironmentFile`
+
 ## .env
 
 claude-pool reads the first `.env` it finds, from the current folder up. Only `CLAUDE_POOL_*` lines are used, so an app's other secrets never reach claude.
