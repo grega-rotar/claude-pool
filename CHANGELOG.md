@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0
+
+- **Live usage:** `--pool-watch [minutes]` checks every account and redraws the table every 5 minutes (or the minutes given, at least 1) until Ctrl+C.
+
 ## 0.6.0
 
 - **.env support:** settings and accounts can live in a `.env` file, the nearest one from the current folder up or `CLAUDE_POOL_ENV_FILE`. Only `CLAUDE_POOL_*` lines are read; a variable that is already set wins.
