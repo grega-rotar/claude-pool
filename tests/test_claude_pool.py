@@ -93,6 +93,14 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(r.stdout, "echo:hi\n")
         self.assertEqual(self.calls()[0]["token"], "login")
 
+    def test_no_accounts_shows_normal_login_usage(self):
+        self.assertIn("login ", self.run_pool("--pool-status").stdout)
+        r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
+        self.assertEqual([c["token"] for c in self.probes()], ["login"])
+        line = [l for l in r.stdout.splitlines() if l.startswith("login ")][0]
+        self.assertIn("50.0", line)
+        self.assertIn("0m ago", line)
+
     def test_text_output_and_stream_flags(self):
         self.add("a", "tok-a")
         r = self.run_pool("-p", "hi", "--output-format", "text")
