@@ -31,5 +31,5 @@ Copy the same token files to each server. Each sees the others' use at the 5-min
 ## Windows
 
 ```powershell
-py -m pip install git+https://github.com/grega-rotar/claude-pool
+py -m pip install --user https://github.com/grega-rotar/claude-pool/archive/refs/heads/main.zip
 ```
