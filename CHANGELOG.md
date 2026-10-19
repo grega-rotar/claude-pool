@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1
+
+- **7-day margin:** an account past `CLAUDE_POOL_SWITCH_AT` (90%) of its 7-day window is now used only when every free account is past the margin too, as with the 5-hour window. Before, an account at 97% of its week still went first when its week reset soonest, and a long run could hit the limit midway.
+
 ## 0.12.0
 
 - **5-hour drain:** when the 7-day window doesn't decide (same reset, or no 7-day numbers, as on team accounts), the account whose 5-hour window resets soonest goes first, then the most used, so its leftover room isn't lost. Accounts with no live 5-hour window go last. Before, the name decided.

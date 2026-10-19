@@ -238,6 +238,20 @@ class PoolTest(unittest.TestCase):
         self.run_pool("-p", "hi")
         self.assertEqual(self.calls()[-1]["token"], "tok-a")
 
+    def test_drain_moves_on_past_the_7d_margin_but_uses_it_as_last_resort(self):
+        now = time.time()
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        rows = {"a": {"seven_day": 97, "five_hour": 5, "resets_ts": now + 600, "seven_day_resets_ts": now + 86400},
+                "b": {"seven_day": 10, "five_hour": 5, "seven_day_resets_ts": now + 5 * 86400}}
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")
+        rows["b"].update(seven_day=95)
+        self.usage(rows)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-a")
+
     def test_skips_account_at_limit(self):
         self.add("a", "tok-a")
         self.add("b", "tok-b")
