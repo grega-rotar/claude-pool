@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.0
+
+- **5-hour drain:** when the 7-day window doesn't decide (same reset, or no 7-day numbers, as on team accounts), the account whose 5-hour window resets soonest goes first, then the most used, so its leftover room isn't lost. Accounts with no live 5-hour window go last. Before, the name decided.
+
 ## 0.11.3
 
 - **Finds claude off PATH:** when `claude` isn't on PATH (an `ssh host 'claude-pool ...'` command or a cron job often runs without `~/.local/bin`), claude-pool looks in `~/.local/bin` and `~/.claude/local`, where the claude installers put it, before it gives up.

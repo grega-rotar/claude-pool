@@ -206,6 +206,24 @@ class PoolTest(unittest.TestCase):
         self.run_pool("-p", "hi")
         self.assertEqual(self.calls()[0]["token"], "tok-live")
 
+    def test_drain_without_weekly_numbers_takes_soonest_5h_reset(self):
+        now = time.time()
+        for n in "abc":
+            self.add(n, "tok-" + n)
+        self.usage({"a": {"five_hour": 19, "resets_ts": now + 4 * 3600},
+                    "b": {"five_hour": 20, "resets_ts": now + 3600}})  # c: no live 5-hour window
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[0]["token"], "tok-b")
+
+    def test_drain_same_5h_reset_takes_most_used_and_unused_last(self):
+        reset = time.time() + 3600
+        for n in "abc":
+            self.add(n, "tok-" + n)
+        self.usage({"a": {"five_hour": 10, "resets_ts": reset}, "b": {"five_hour": 40, "resets_ts": reset},
+                    "c": {"five_hour": 80, "resets_ts": time.time() - 60}})
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[0]["token"], "tok-b")
+
     def test_drain_moves_on_past_the_5h_margin_but_uses_it_as_last_resort(self):
         now = time.time()
         self.add("a", "tok-a")

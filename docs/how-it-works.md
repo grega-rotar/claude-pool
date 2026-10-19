@@ -3,7 +3,7 @@
 ## Picking an account
 
 - **Usage:** each print-mode run reports the account's usage and claude-pool saves it. Numbers older than 5 minutes are rechecked with a tiny Haiku call (~$0.0001), so other apps' use counts too. Print mode waits for that check before it picks. An interactive session doesn't: it starts on the saved numbers and the check runs in the background (only with no saved numbers yet does it check first).
-- **Order:** it uses the account whose week resets soonest first, since leftover usage is lost at the reset. At 90% of the 5-hour limit it moves on. Unused accounts go last.
+- **Order:** it uses the account whose week resets soonest first, since leftover usage is lost at the reset. At 90% of the 5-hour limit it moves on. When the weeks tie, the 5-hour window decides the same way. Unused accounts go last.
 - **Your own login first:** when the caller's claude folder is one of the pool's accounts (an Orca pane on its account), that account goes first while it's under 90%.
 - **Busy accounts:** past 75% of its 5-hour window, an account that's already running something gets no second run while another has room.
 

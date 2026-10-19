@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.11.3"
+__version__ = "0.12.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -454,7 +454,7 @@ def choose(pool, usage, skip=(), now=None, prefer=None):
 
     drain (default): the account whose 7-day window resets soonest, since its unused room is lost first; then the
     most used. Accounts with no live window (never used, or reset since) come last, so they don't start a window
-    before it's needed. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour window is used only when every
+    before it's needed. Ties (often no 7-day numbers at all) go the same way by the 5-hour window. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour window is used only when every
     free account is, so a run is less likely to be cut off midway; and one past CLAUDE_POOL_SPREAD_AT that is
     already running something gets no second run while another account has room.
     balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0."""
@@ -466,10 +466,14 @@ def choose(pool, usage, skip=(), now=None, prefer=None):
     roomy = [n for n in free if five_hour(row(n), now) < env_num("CLAUDE_POOL_SWITCH_AT", 90)]
     calm = [n for n in roomy if not (running(row(n), now) and five_hour(row(n), now) >= env_num("CLAUDE_POOL_SPREAD_AT", 75))]
 
-    def key(n):
-        reset = row(n).get("seven_day_resets_ts") or 0
+    def drain(reset, used):
         live = reset > now
-        return (not live, reset if live else 0, -(row(n).get("seven_day") or 0) if live else 0, n)
+        return (not live, reset if live else 0, -used if live else 0)
+
+    def key(n):
+        r = row(n)
+        return (drain(r.get("seven_day_resets_ts") or 0, r.get("seven_day") or 0)
+                + drain(r.get("resets_ts") or 0, r.get("five_hour") or 0) + (n,))
     if prefer in calm:  # the caller's own login (an Orca pane's account) while it has room
         return prefer
     return min(calm or roomy or free, key=key, default=None)
