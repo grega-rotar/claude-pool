@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0
+
+- **Account in stream-json:** each run starts with a `pool_account` system line naming the account, so a caller reading the stream knows which account it ran on.
+
 ## 0.7.1
 
 - **Usage without accounts:** with no accounts set up, `--pool-status`, `--pool-refresh` and `--pool-watch` show the normal claude login as a row named `login`, with its usage.
