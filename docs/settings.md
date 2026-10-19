@@ -17,6 +17,7 @@ All optional. Set them as environment variables or as lines in a `.env`.
 | `CLAUDE_POOL_LIMIT` | `100` | % that counts as full |
 | `CLAUDE_POOL_RERUN` | `safe` | After a limit cut-off: `safe` (only if no tools ran), `always`, `never` |
 | `CLAUDE_POOL_SWITCH` | `on` | `off` = an interactive session stays on its first account |
+| `CLAUDE_POOL_ORCA` | `auto` | Orca's logins: `auto` = in interactive sessions and `--pool-*` commands, `on` = in print mode too, `off`, or the path of Orca's data folder (as `on`) |
 | `CLAUDE_POOL_RESUME_PROMPT` | Continue where you left off. … | What a switched session is told first; empty = nothing, you type |
 | `CLAUDE_POOL_ALERT` | | Command run on problems, gets `$CLAUDE_POOL_MESSAGE` |
 | `CLAUDE_POOL_LOG` | next to the usage file | Event log |

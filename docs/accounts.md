@@ -23,6 +23,14 @@ It counts at once. Anything already running claude-pool picks it up on its next 
 - An API key goes in `work.key` instead of `work.token`.
 - No file: put `CLAUDE_POOL_TOKEN_WORK=sk-ant-oat01-...` in the environment or a `.env` (`CLAUDE_POOL_KEY_WORK` for a key).
 
+## A logged-in claude folder
+
+A `<name>.dir` file holds the path of a claude config folder (`CLAUDE_CONFIG_DIR`) that is logged in, for example one made with `CLAUDE_CONFIG_DIR=~/.claude-work claude` and `/login`. claude-pool runs claude in that folder, and claude keeps its login fresh. A session can only move between accounts whose folders share `projects/`.
+
+## Orca's accounts
+
+Every Claude account logged in to Orca shows up as `orca-<name>` (the part of its email before the @) in interactive sessions and `--pool-*` commands. There's nothing to add: log in or out in Orca and the pool follows. One account in several Orca profiles counts once. `claude-pool --pool-off orca-<name>` leaves one out (it writes an empty `orca-<name>.off` file in the account folder), and `--pool-on` puts it back. For `CLAUDE_POOL_ORCA`, see [Settings](settings.md).
+
 ## Renew one
 
 Tokens last a year. Make a new one with `claude setup-token` and write it over the old file. The name and usage stay.

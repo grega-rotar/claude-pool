@@ -24,13 +24,16 @@ if args == ["--help"]:
           "  -w, --worktree [name]  Worktree\n  -v, --version  Version\n\nCommands:\n  mcp  MCP\n  update|upgrade  Update")
     sys.exit(0)
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
+cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+if tok == "login" and cfg and os.path.isfile(os.path.join(cfg, "fake-login")):  # a logged-in config folder (Orca)
+    tok = open(os.path.join(cfg, "fake-login")).read().strip()
 settings = None
 if "--settings" in args:
     with open(args[args.index("--settings") + 1]) as f:
         settings = json.load(f)
 os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
 with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
-    f.write(json.dumps({"args": args, "token": tok, "settings": settings, "cwd": os.getcwd(),
+    f.write(json.dumps({"args": args, "token": tok, "settings": settings, "cwd": os.getcwd(), "config_dir": cfg,
                         "pool_secrets": sorted(k for k in os.environ if k.startswith(("CLAUDE_POOL_TOKEN_", "CLAUDE_POOL_KEY_")))}))
 if "-p" not in args:
     failure = {"limit": ("rate_limit", "You've hit your session limit"),
@@ -92,8 +95,11 @@ class PoolTest(unittest.TestCase):
             self.fake += ".cmd"
         self.log = os.path.join(self.tmp, "log")
         self.state = os.path.join(self.tmp, "usage.json")
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_POOL", "ANTHROPIC", "CLAUDE_CODE"))}
-        self.env.update(CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
+        # Nothing of this machine's own claude, Orca or home folders: each test has its own.
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_POOL", "ANTHROPIC", "CLAUDE_CODE", "ORCA_"))
+                    and k not in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "APPDATA")}
+        self.env.update(HOME=self.tmp, USERPROFILE=self.tmp)
+        self.env.update(CLAUDE_POOL_ORCA="off", CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
                         FAKE_LOG=self.log)
 
     def add(self, name, secret, ext=".token"):
@@ -308,12 +314,108 @@ class PoolTest(unittest.TestCase):
         self.add("a", "limit-a")
         self.add("b", "limit-b")
         self.add("c", "tok-c")
+        # b was checked a moment ago, so it is trusted without a recheck and the session goes a -> b -> c.
         self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600},
-                    "b": {"seven_day": 50, "seven_day_resets_ts": time.time() + 7200}})
+                    "b": {"seven_day": 50, "seven_day_resets_ts": time.time() + 7200, "checked_ts": time.time()}})
         self.run_pool("hi", CLAUDE_POOL_RESUME_PROMPT="go on")
         a, b, c = self.sessions()
         self.assertEqual([x["token"] for x in (a, b, c)], ["limit-a", "limit-b", "tok-c"])
         self.assertEqual(c["args"][2:], ["--resume", "sess-1", "go on"])
+
+    def test_switch_rechecks_the_next_account_first(self):
+        # b's saved numbers are old and say it has room, but it is full: the recheck skips it.
+        self.add("a", "limit-a")
+        self.add("b", "limit-b")
+        self.add("c", "tok-c")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600},
+                    "b": {"seven_day": 50, "seven_day_resets_ts": time.time() + 7200, "checked_ts": time.time() - 3600}})
+        r = self.run_pool("hi")
+        self.assertIn("a hit its usage limit; going on with c", r.stderr)
+        self.assertEqual([x["token"] for x in self.sessions()], ["limit-a", "tok-c"])
+        self.assertIn("limit-b", [c["token"] for c in self.probes()])
+
+    # --- Orca ---------------------------------------------------------------------------------------------
+
+    def orca(self, profiles, shared=True):
+        """A fake Orca data folder: {profile id: (account uuid, email, fake login or None for logged out)}."""
+        root = os.path.join(self.tmp, "orca")
+        sessions = os.path.join(self.tmp, "claude-home", "projects")
+        os.makedirs(sessions, exist_ok=True)
+        for pid, (uuid, email, login) in profiles.items():
+            home = os.path.join(root, "claude-profiles", pid, "home")
+            os.makedirs(home)
+            with open(os.path.join(home, ".claude.json"), "w") as f:
+                json.dump({"oauthAccount": {"accountUuid": uuid, "emailAddress": email}}, f)
+            if login:
+                with open(os.path.join(home, ".credentials.json"), "w") as f:
+                    f.write("{}")
+                with open(os.path.join(home, "fake-login"), "w") as f:
+                    f.write(login)
+            if shared:  # as Orca does: every profile's conversations live in one ~/.claude/projects
+                try:
+                    os.symlink(sessions, os.path.join(home, "projects"))
+                except OSError:
+                    self.skipTest("no symlinks here")
+        return root
+
+    def home_of(self, root, pid):
+        return os.path.join(root, "claude-profiles", pid, "home")
+
+    def test_orca_accounts_are_found_once_each_and_logged_out_ones_skipped(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "tok-2"),
+                          "p3": ("u1", "alice@x.com", "tok-1"), "p4": ("u4", "carol@x.com", None)})
+        out = self.run_pool("--pool-status", CLAUDE_POOL_ORCA=root).stdout
+        names = [l.split()[0] for l in out.splitlines()[1:]]
+        # macOS keeps the login in the Keychain, so there a profile without .credentials.json still counts.
+        self.assertEqual(sorted(names), ["orca-alice", "orca-bob"] + (["orca-carol"] if sys.platform == "darwin" else []))
+
+    def test_orca_session_starts_on_the_panes_own_account_and_moves_on(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "limit-2")})
+        r = self.run_pool("hi", "--model", "haiku", CLAUDE_POOL_ORCA=root, CLAUDE_CONFIG_DIR=self.home_of(root, "p2"))
+        self.assertIn("orca-bob hit its usage limit; going on with orca-alice", r.stderr)
+        first, second = self.sessions()
+        self.assertEqual((first["token"], first["config_dir"]), ("limit-2", self.home_of(root, "p2")))
+        self.assertEqual((second["token"], second["config_dir"]), ("tok-1", self.home_of(root, "p1")))
+        self.assertEqual(second["args"][2:], ["--model", "haiku", "--resume", "sess-1",
+                                              "Continue where you left off. Your last turn was cut off by a usage limit."])
+
+    def test_orca_and_tokens_mix_when_they_share_the_conversations(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "limit-1")})
+        self.add("work", "tok-w")
+        own = self.home_of(root, "p1")
+        self.run_pool("hi", CLAUDE_POOL_ORCA=root, CLAUDE_CONFIG_DIR=own)
+        self.assertEqual([(c["token"], c["config_dir"]) for c in self.sessions()], [("limit-1", own), ("tok-w", own)])
+
+    def test_no_switch_to_an_account_that_cant_see_the_conversation(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "limit-2")}, shared=False)
+        self.run_pool("hi", CLAUDE_POOL_ORCA=root, CLAUDE_CONFIG_DIR=self.home_of(root, "p2"), FAKE_WAIT="1")
+        self.assertEqual([c["token"] for c in self.sessions()], ["limit-2"])
+
+    def test_print_mode_leaves_orca_out_unless_on(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1")})
+        self.run_pool("-p", "hi", CLAUDE_POOL_ORCA="auto", ORCA_USER_DATA_PATH=root)
+        self.assertEqual(self.calls()[-1]["token"], "login")
+        self.assertIn("orca-alice", self.run_pool("--pool-status", CLAUDE_POOL_ORCA="auto", ORCA_USER_DATA_PATH=root).stdout)
+        self.run_pool("-p", "hi", CLAUDE_POOL_ORCA="on", ORCA_USER_DATA_PATH=root)
+        self.assertEqual(self.calls()[-1]["token"], "tok-1")
+        r = self.run_pool("-p", "hi", CLAUDE_POOL_ORCA="off", ORCA_USER_DATA_PATH=root)
+        self.assertEqual(self.calls()[-1]["token"], "login", r.stderr)
+
+    def test_orca_account_off_and_on(self):
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "tok-2")})
+        self.assertEqual(self.run_pool("--pool-off", "orca-bob", CLAUDE_POOL_ORCA=root).returncode, 0)
+        self.assertNotIn("orca-bob", self.run_pool("--pool-status", CLAUDE_POOL_ORCA=root).stdout)
+        self.run_pool("--pool-on", "orca-bob", CLAUDE_POOL_ORCA=root)
+        self.assertIn("orca-bob", self.run_pool("--pool-status", CLAUDE_POOL_ORCA=root).stdout)
+
+    def test_dir_file_account(self):
+        cfg = os.path.join(self.tmp, "cfg")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "fake-login"), "w") as f:
+            f.write("tok-d")
+        self.add("d", cfg, ext=".dir")
+        self.run_pool("-p", "hi")
+        self.assertEqual((self.calls()[-1]["token"], self.calls()[-1]["config_dir"]), ("tok-d", cfg))
 
     def test_short_rate_limit_does_not_switch(self):
         self.add("a", "blip-a")

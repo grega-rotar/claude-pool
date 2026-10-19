@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+- **Orca's accounts join the pool:** every Claude account logged in to [Orca](https://github.com/stablyai/orca) is an account named `orca-<name>`, with no `setup-token` step. claude runs in that account's Orca folder, and claude keeps the login fresh there. They're used in interactive sessions and `--pool-*` commands. Print mode leaves them out unless `CLAUDE_POOL_ORCA=on`, so scripts and services keep to their own accounts.
+- **`.dir` accounts:** a `<name>.dir` file names any logged-in claude config folder.
+- **Your own login first:** in an Orca pane, the pane's account is used first while it has room.
+- **Safer switches:** before a session moves on, the next account's usage is checked again unless it was checked in the last minute, and only accounts that can see the conversation are picked.
+
 ## 0.9.0
 
 - **Interactive sessions switch accounts:** when a session hits its usage limit, or its token is refused, claude-pool resumes the same conversation on the next free account and tells it to continue. Your flags carry over, and the restart happens in the session's own folder (its worktree with `-w`). It works through a `StopFailure` hook passed with `--settings`, merged into your own `--settings` if you pass one. `CLAUDE_POOL_SWITCH=off` turns it off, and `CLAUDE_POOL_RESUME_PROMPT` changes the nudge.

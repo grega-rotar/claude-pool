@@ -9,6 +9,8 @@ that hits a usage limit goes on by itself on the next free account: same convers
 Accounts: one file per account in $CLAUDE_POOL_DIR (default ~/.config/claude-pool, on Windows %APPDATA%\claude-pool):
   <name>.token   an OAuth token from `claude setup-token` (Claude subscription)
   <name>.key     an Anthropic API key
+  <name>.dir     the path of a claude config folder that is logged in (CLAUDE_CONFIG_DIR)
+Accounts logged in to Orca join by themselves in interactive sessions, as orca-<name>.
 Rename a file to <name>.token.off to take the account out. The folder is reread on every run. With no files,
 claude-pool runs claude with your normal login, so it is safe to install before you add any accounts.
 
@@ -42,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -84,6 +86,8 @@ Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optio
   CLAUDE_POOL_RERUN        after a limit cut-off: safe (only if no tools ran), always, never (safe)
   CLAUDE_POOL_SWITCH       off = an interactive session stays on its first account (on)
   CLAUDE_POOL_RESUME_PROMPT what a switched session is told first; empty = nothing, wait for you
+  CLAUDE_POOL_ORCA         Orca's logins: auto (interactive sessions and --pool-* commands), on (print mode
+                           too), off, or the path of Orca's data folder (as on) (auto)
   CLAUDE_POOL_ALERT        shell command run on problems, with CLAUDE_POOL_EVENT and CLAUDE_POOL_MESSAGE set
 
 Exit code 75: every account is full. More: https://github.com/grega-rotar/claude-pool"""
@@ -279,10 +283,70 @@ def shown(pool):
     return pool or {"login": ("login", None)}
 
 
-def accounts(warn=False):
-    """{name: (kind, secret)} for every <name>.token / <name>.key in the pool folder, plus the accounts set in
-    variables. A file wins over a variable with the same name."""
+def orca_roots():
+    """Orca's data folders that hold claude-profiles/: CLAUDE_POOL_ORCA when it is a path, else the usual places."""
+    v = os.environ.get("CLAUDE_POOL_ORCA") or ""
+    if v.lower() not in ("", "auto", "on", "off"):
+        return [os.path.expanduser(v)]
+    home = os.path.expanduser("~")
+    roots = [os.environ.get("ORCA_USER_DATA_PATH"),
+             os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share"), "orca"),  # WSL runtime
+             os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "orca"),  # Linux
+             os.path.join(home, "Library", "Application Support", "orca"),  # macOS
+             os.path.join(os.environ["APPDATA"], "orca") if os.environ.get("APPDATA") else None]  # Windows
+    out = []
+    for r in roots:
+        if r and os.path.isdir(os.path.join(r, "claude-profiles")) and os.path.realpath(r) not in map(os.path.realpath, out):
+            out.append(r)
+    return out
+
+
+def orca_wanted(interactive):
+    """Orca's logins join the pool in interactive sessions and the --pool-* commands (CLAUDE_POOL_ORCA=auto, the
+    default), everywhere with on, never with off. Print mode leaves them out by default, so scripts and services
+    keep to the accounts set up for them."""
+    v = (os.environ.get("CLAUDE_POOL_ORCA") or "auto").lower()
+    return v != "off" and (interactive or v not in ("auto",))
+
+
+def orca_accounts():
+    """{orca-<name>: ("dir", profile folder)} for every Claude account logged in to Orca. Each Orca profile is a
+    claude config folder with its own login; one account in several profiles counts once (the caller's own first)."""
+    out, seen = {}, set()
+    own = os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"))
+    homes = []
+    for root in orca_roots():
+        base = os.path.join(root, "claude-profiles")
+        try:
+            homes += [os.path.join(base, p, "home") for p in sorted(os.listdir(base))]
+        except OSError:
+            continue
+    for home in sorted(homes, key=lambda h: os.path.realpath(h) != own):
+        try:
+            with open(os.path.join(home, ".claude.json"), encoding="utf-8") as f:
+                acct = json.load(f).get("oauthAccount") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        uuid = acct.get("accountUuid")
+        # Logged out: no .credentials.json. macOS keeps the login in the Keychain instead.
+        if not uuid or uuid in seen or (sys.platform != "darwin" and not os.path.isfile(os.path.join(home, ".credentials.json"))):
+            continue
+        seen.add(uuid)
+        label = re.sub(r"[^a-z0-9]+", "-", str(acct.get("emailAddress") or "").split("@")[0].lower()).strip("-")
+        name = "orca-" + (label or os.path.basename(os.path.dirname(home))[:8])
+        if name in out:
+            name += "-" + os.path.basename(os.path.dirname(home))[:4]
+        out[name] = ("dir", home)
+    return out
+
+
+def accounts(warn=False, orca=False):
+    """{name: (kind, secret)} for every <name>.token / <name>.key / <name>.dir in the pool folder, plus the accounts
+    set in variables and, with `orca`, the accounts logged in to Orca. A file wins over a variable with the same
+    name, a variable over Orca. An empty <name>.off file leaves out an Orca account."""
     out, d = env_accounts(), pool_dir()
+    if orca:
+        out = {**orca_accounts(), **out}
     if not os.path.isdir(d):
         return out
     try:
@@ -292,7 +356,9 @@ def accounts(warn=False):
                  "for a shared pool, add this user to the folder's group")
     for f in files:
         name, ext = os.path.splitext(f)
-        if ext not in (".token", ".key"):
+        if ext == ".off" and "." not in name and out.get(name, ("",))[0] == "dir":
+            out.pop(name)
+        if ext not in (".token", ".key", ".dir"):
             continue
         path = os.path.join(d, f)
         try:
@@ -305,7 +371,8 @@ def accounts(warn=False):
             print(f"claude-pool: warning: {path} can be read by every user; run chmod 600 (or 640 for a shared pool)",
                   file=sys.stderr)
         if secret:
-            out[name] = ("token" if ext == ".token" else "key", secret)
+            out[name] = ({".token": "token", ".key": "key"}.get(ext, "dir"),
+                         os.path.expanduser(secret) if ext == ".dir" else secret)
     return out
 
 
@@ -381,7 +448,7 @@ def five_hour(row, now):
     return (row.get("five_hour") or 0) if (row.get("resets_ts") or 0) > now else 0
 
 
-def choose(pool, usage, skip=(), now=None):
+def choose(pool, usage, skip=(), now=None, prefer=None):
     """The free account to run on next, else None.
 
     drain (default): the account whose 7-day window resets soonest, since its unused room is lost first; then the
@@ -402,6 +469,8 @@ def choose(pool, usage, skip=(), now=None):
         reset = row(n).get("seven_day_resets_ts") or 0
         live = reset > now
         return (not live, reset if live else 0, -(row(n).get("seven_day") or 0) if live else 0, n)
+    if prefer in calm:  # the caller's own login (an Orca pane's account) while it has room
+        return prefer
     return min(calm or roomy or free, key=key, default=None)
 
 
@@ -466,7 +535,7 @@ def probe(name, kind, secret, binary):
         record(name, None, ran=False, error=error)
         log("token_broken", account=name, error=error, message=f"the token of {name} was refused: {error}")
         return "broken"
-    if final.get("subtype") == "success" and kind == "login":  # logged in with an API key: no usage windows
+    if final.get("subtype") == "success" and kind in ("login", "dir"):  # logged in with an API key: no usage windows
         touch(name)
         return "no_usage"
     if final.get("subtype") == "success":
@@ -485,7 +554,7 @@ def refresh(pool, names=None, stale_only=False):
     then go on with the old ones. Returns {name: result}."""
     def due(usage):
         now = time.time()
-        return [n for n, (kind, _) in pool.items() if kind in ("token", "login") and (names is None or n in names)
+        return [n for n, (kind, _) in pool.items() if kind in ("token", "login", "dir") and (names is None or n in names)
                 and (not stale_only or now - ((usage.get(n) or {}).get("checked_ts") or 0) >= fresh_secs())]
     if not due(load_usage()):
         return {}
@@ -529,6 +598,11 @@ def record(name, info, ran=True, error=None):
 def account_env(kind, secret):
     env = child_env()
     if kind == "login":  # the normal claude login: no secret of ours
+        return env
+    if kind == "dir":  # a claude config folder with its own login (an Orca profile): claude keeps it fresh itself
+        env["CLAUDE_CONFIG_DIR"] = secret
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        env.pop("ANTHROPIC_API_KEY", None)
         return env
     if kind == "token":
         env["CLAUDE_CODE_OAUTH_TOKEN"] = secret
@@ -655,7 +729,7 @@ def emit(fmt, verbose, events, final):
 
 def run(args):
     """Print mode: run claude on the best account, rerun on the next when a usage limit cuts it off."""
-    pool = accounts()
+    pool = accounts(orca=orca_wanted(False))
     forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
     if forced and forced not in pool:
         sys.exit(f"claude-pool: no account {forced!r} in {pool_dir()}")
@@ -669,7 +743,7 @@ def run(args):
     data = None if streaming_in else piped_stdin()
     rerun = os.environ.get("CLAUDE_POOL_RERUN") or "safe"
     tried, switched = set(), []
-    name = forced or choose(pool, usage)
+    name = forced or choose(pool, usage, prefer=own_account(pool))
     if pool and not name:
         resets = [r for r in (at_limit(usage.get(n) or {}) for n in pool) if r]
         when = datetime.fromtimestamp(min(resets), timezone.utc).isoformat() if resets else "unknown"
@@ -952,7 +1026,7 @@ def usage_limited(name, pool, failure):
     checked either way, so every caller sees its new numbers."""
     if failure.get("error") != "rate_limit":
         return False
-    if pool[name][0] in ("token", "login"):
+    if pool[name][0] in ("token", "login", "dir"):
         refresh({name: pool[name]}, names=[name])
     text = f"{failure.get('last_assistant_message') or ''} {failure.get('error_details') or ''}"
     if at_limit(load_usage().get(name) or {}):
@@ -966,6 +1040,37 @@ def usage_limited(name, pool, failure):
         if (row.get("resets_ts") or 0) <= time.time():
             row["resets_ts"] = time.time() + 900
     return True
+
+
+def own_account(pool):
+    """The pool account that is the caller's own claude login folder (CLAUDE_CONFIG_DIR), if any."""
+    own = os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"))
+    return next((n for n, (kind, secret) in pool.items() if kind == "dir" and os.path.realpath(secret) == own), None)
+
+
+def sessions_dir(kind, secret):
+    """Where claude keeps the conversations of a run on this account. A session can only move between accounts
+    that share it (Orca's profiles all link projects/ to ~/.claude/projects)."""
+    base = secret if kind == "dir" else os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.realpath(os.path.join(base, "projects"))
+
+
+def next_free(pool, name):
+    """The account a session on `name` moves to: one that sees the same conversations, rechecked just now (unless
+    checked in the last minute) so a switch never lands on an account that is full too, e.g. the same account
+    twice in the pool, once as a token and once in Orca."""
+    here = sessions_dir(*pool[name])
+    skip = {name} | {n for n in pool if sessions_dir(*pool[n]) != here}
+    while True:
+        nxt = choose(pool, load_usage(), skip=skip)
+        if not nxt or pool[nxt][0] == "key":
+            return nxt
+        if time.time() - ((load_usage().get(nxt) or {}).get("checked_ts") or 0) > 60:
+            refresh({nxt: pool[nxt]}, names=[nxt])
+        row = load_usage().get(nxt) or {}
+        if not at_limit(row) and not broken(row):
+            return nxt
+        skip.add(nxt)
 
 
 def stop(p):
@@ -1020,7 +1125,7 @@ def interactive(args, pool, name, binary, spec):
                     name, pool, failure) else None
                 if not why:
                     continue
-                nxt = choose(pool, load_usage(), skip={name})
+                nxt = next_free(pool, name)
                 if not nxt and why == "was refused":
                     log("switch_failed", account=name, message=f"{name} was refused and no other account is free")
                     continue
@@ -1057,7 +1162,7 @@ def interactive(args, pool, name, binary, spec):
 
 def status():
     """The accounts as a table: usage, when it resets (local time), and what happens to each account next."""
-    pool, usage = shown(accounts(warn=True)), load_usage()
+    pool, usage = shown(accounts(warn=True, orca=orca_wanted(True))), load_usage()
     now = time.time()
     best = choose(pool, usage)
     pct = lambda v: "-" if v is None else f"{v:g}%"  # noqa: E731
@@ -1100,7 +1205,7 @@ def watch(minutes):
     wait = max(60, int(minutes * 60))
     try:
         while True:
-            refresh(shown(accounts()))
+            refresh(shown(accounts(orca=orca_wanted(True))))
             if sys.stdout.isatty():
                 print("\033[H\033[2J", end="")  # clear the screen
             status()
@@ -1149,7 +1254,7 @@ def add(name):
 
 def toggle(name, on):
     name, d = valid_name(name), pool_dir()
-    for ext in (".token", ".key"):
+    for ext in (".token", ".key", ".dir"):
         src, dst = (os.path.join(d, name + ext + ".off"), os.path.join(d, name + ext))
         if not on:
             src, dst = dst, src
@@ -1158,6 +1263,16 @@ def toggle(name, on):
             print(f"{name} is {'on' if on else 'off'}")
             log("account_on" if on else "account_off", account=name)
             return 0
+    marker = os.path.join(d, name + ".off")  # an Orca account has no file of ours: an empty <name>.off leaves it out
+    if name in orca_accounts() and on == os.path.exists(marker):
+        if on:
+            os.remove(marker)
+        else:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            open(marker, "w").close()
+        print(f"{name} is {'on' if on else 'off'}")
+        log("account_on" if on else "account_off", account=name)
+        return 0
     sys.exit(f"claude-pool: no {'disabled' if on else 'active'} account {name!r} in {d}")
 
 
@@ -1226,7 +1341,11 @@ def check():
             say("OK" if got else "WARN", f"usage file {sp}" + ("" if got else " (lock busy for 5 s)"))
     except OSError as e:
         say("FAIL", f"usage file {sp}: {e.strerror}; this user must be able to write that folder")
-    pool = accounts()
+    pool = accounts(orca=orca_wanted(True))
+    if orca_wanted(True):
+        found = [n for n, (k, _) in pool.items() if n.startswith("orca-") and k == "dir"]
+        say("OK" if found else "WARN", "Orca accounts: " + ", ".join(found) if found else
+            "no Orca accounts logged in" if orca_roots() else "Orca not found (CLAUDE_POOL_ORCA=<its data folder>)")
     if binary and pool:
         results = refresh(pool)
         for n, (kind, _) in pool.items():
@@ -1234,7 +1353,7 @@ def check():
                 say("OK", f"{n}: API key (no usage windows to check)")
                 continue
             r = results.get(n)
-            text = {"ok": "token works, usage read", "broken": "token refused: " + str((load_usage().get(n) or {}).get("error")),
+            text = {"ok": ("login" if kind == "dir" else "token") + " works, usage read", "broken": "token refused: " + str((load_usage().get(n) or {}).get("error")),
                     "no_usage": "claude printed no usage numbers; claude-pool can't pick well with this claude version",
                     "timeout": f"check took over {PROBE_TIMEOUT} s", "failed": "check failed; see --pool-log"}.get(r, "not checked")
             say({"ok": "OK", "broken": "FAIL", "no_usage": "FAIL"}.get(r, "WARN"), f"{n}: {text}")
@@ -1260,7 +1379,7 @@ def main(argv=None):
     if cmd == "--pool-status":
         return status()
     if cmd == "--pool-refresh":
-        refresh(shown(accounts()), names=rest or None)
+        refresh(shown(accounts(orca=orca_wanted(True))), names=rest or None)
         return status()
     if cmd == "--pool-watch":
         try:
@@ -1281,15 +1400,16 @@ def main(argv=None):
         return run(args)
     # Interactive or a subcommand: pick the account. A session that can move to another account at a usage limit
     # runs under claude-pool; anything else gets claude to itself.
-    pool = accounts()
+    binary = real_binary()
+    session = session_mode(args, cli_spec(binary))
+    pool = accounts(orca=orca_wanted(session))
     forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
     if not forced and fresh_secs() > 0:
         refresh(pool, stale_only=True)
-    name = forced or choose(pool, load_usage())
+    name = forced or choose(pool, load_usage(), prefer=own_account(pool))
     env = account_env(*pool[name]) if name in pool else child_env()
-    binary = real_binary()
     if (name in pool and not forced and len(pool) > 1 and os.environ.get("CLAUDE_POOL_SWITCH", "on") != "off"
-            and session_mode(args, cli_spec(binary))):
+            and session):
         if hooks_run():
             return interactive(args, pool, name, binary, cli_spec(binary))
         print("claude-pool: Git Bash not found, so this session can't switch accounts at a usage limit "
