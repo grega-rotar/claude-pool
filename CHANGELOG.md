@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.3
+
+- **Finds claude off PATH:** when `claude` isn't on PATH (an `ssh host 'claude-pool ...'` command or a cron job often runs without `~/.local/bin`), claude-pool looks in `~/.local/bin` and `~/.claude/local`, where the claude installers put it, before it gives up.
+
 ## 0.11.2
 
 - **Status line really on the right:** claude runs the status line without a terminal, so the width now comes from claude's own terminal (on Linux), and the padding can't be trimmed away.
