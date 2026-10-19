@@ -1,51 +1,41 @@
 # claude-pool
 
-Runs `claude` on whichever of your accounts has usage left. Use it exactly like `claude`.
+You have more than one Claude account. claude-pool runs `claude` on the one that still has usage left, and moves to the next when one is full. You use it exactly like `claude`.
 
-## Install
+## Start in 3 steps
 
-```sh
-curl -fsSL https://github.com/grega-rotar/claude-pool/releases/latest/download/claude_pool.py -o ~/.local/bin/claude-pool
-chmod +x ~/.local/bin/claude-pool
-```
+1. **Install**
 
-## Add accounts
+   ```sh
+   curl -fsSL https://github.com/grega-rotar/claude-pool/releases/latest/download/claude_pool.py -o ~/.local/bin/claude-pool
+   chmod +x ~/.local/bin/claude-pool
+   ```
 
-Run `claude setup-token` for each account, then:
+2. **Add an account.** Run `claude setup-token`, log in, copy the token, then:
 
-```sh
-claude-pool --pool-add work
-```
+   ```sh
+   claude-pool --pool-add work
+   ```
 
-Or put them in a `.env`:
+   Do this once per account. The name (`work`) is only a label.
 
-```sh
-CLAUDE_POOL_TOKEN_WORK=sk-ant-oat01-...
-```
+3. **Use it** like `claude`:
 
-## Use
+   ```sh
+   claude-pool -p "hi"
+   ```
 
-```sh
-claude-pool -p "hi"
-```
+See your accounts and their usage: `claude-pool --pool-status`
 
-## Commands
+## More
 
-| Command | What it does |
+| Page | For |
 |---|---|
-| `claude-pool --pool-status` | Every account with its usage, when it resets, and which one runs next |
-| `claude-pool --pool-watch [minutes]` | The same table, checked again every 5 minutes (or the minutes given) until Ctrl+C |
-| `claude-pool --pool-refresh [name..]` | Check the usage of every account (or the named ones) now |
-| `claude-pool --pool-check` | Check the setup: claude, folders, permissions, every token |
-| `claude-pool --pool-add <name>` | Add an account and paste its token, or pipe it in: `echo "$TOKEN" \| claude-pool --pool-add work` |
-| `claude-pool --pool-off <name>` | Take an account out (renames its file to `.off`) |
-| `claude-pool --pool-on <name>` | Put it back |
-| `claude-pool --pool-log [N]` | The last N events (default 20): runs, switches, errors |
-| `claude-pool --pool-version` | The version |
-| `claude-pool --pool-help` | All commands and settings |
-
-Anything else goes to `claude` unchanged.
-
-More: [where things live and doing it by hand](docs/manual.md), [settings](docs/settings.md), [how it works](docs/how-it-works.md), [servers](docs/server.md).
+| [Accounts](docs/accounts.md) | add, renew, take out, remove, by hand |
+| [Commands](docs/commands.md) | every `--pool-*` command |
+| [Settings](docs/settings.md) | `CLAUDE_POOL_*` variables and `.env` |
+| [Files](docs/files.md) | where tokens, usage and the log live |
+| [Servers](docs/server.md) | systemd, shared pools, several servers, Windows |
+| [How it works](docs/how-it-works.md) | how it picks an account and handles limits |
 
 Using several accounts to get around usage limits breaks Anthropic's terms. MIT.
