@@ -32,9 +32,11 @@ if "--settings" in args:
     with open(args[args.index("--settings") + 1]) as f:
         settings = json.load(f)
 os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
-with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
+call = os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid()))
+with open(call + ".tmp", "w") as f:  # renamed when whole, so a test polling the log never reads half a file
     f.write(json.dumps({"args": args, "token": tok, "settings": settings, "cwd": os.getcwd(), "config_dir": cfg,
                         "pool_secrets": sorted(k for k in os.environ if k.startswith(("CLAUDE_POOL_TOKEN_", "CLAUDE_POOL_KEY_")))}))
+os.replace(call + ".tmp", call)
 if "-p" not in args:
     failure = {"limit": ("rate_limit", "You've hit your session limit"),
                "orgoff": ("oauth_org_not_allowed", "Your organization has disabled Claude subscription access"),
@@ -118,7 +120,7 @@ class PoolTest(unittest.TestCase):
         if not os.path.exists(self.log):
             return []
         out = []
-        for name in sorted(os.listdir(self.log)):
+        for name in sorted(n for n in os.listdir(self.log) if n.endswith(".json")):
             with open(os.path.join(self.log, name)) as f:
                 out.append(json.loads(f.read()))
         return out

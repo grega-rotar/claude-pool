@@ -18,6 +18,10 @@ jobs:
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but claude_pool.py says $v"; exit 1; }
       - name: Notes from CHANGELOG.md
         run: awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## "v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
-      - run: gh release create "$GITHUB_REF_NAME" claude_pool.py --title "$GITHUB_REF_NAME" --notes-file notes.md
+      - name: Release (or refresh one made by hand)
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            && gh release upload "$GITHUB_REF_NAME" claude_pool.py --clobber \
+            || gh release create "$GITHUB_REF_NAME" claude_pool.py --title "$GITHUB_REF_NAME" --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}
