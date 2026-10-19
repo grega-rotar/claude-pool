@@ -100,7 +100,7 @@ class PoolTest(unittest.TestCase):
                     and k not in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "APPDATA")}
         self.env.update(HOME=self.tmp, USERPROFILE=self.tmp)
         self.env.update(CLAUDE_POOL_ORCA="off", CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
-                        FAKE_LOG=self.log)
+                        FAKE_LOG=self.log, COLUMNS="0")
 
     def add(self, name, secret, ext=".token"):
         with open(os.path.join(self.pool, name + ext), "w") as f:
@@ -448,8 +448,19 @@ class PoolTest(unittest.TestCase):
         self.usage({"a": {"five_hour": 95, "resets_ts": now + 3600}, "b": {"status": "rejected", "resets_ts": now + 1800}})
         out = self.run_pool("--pool-statusline", folder, stdin="{}").stdout
         until = time.strftime("%H:%M", time.localtime(now + 1800))
-        self.assertIn("\033[33m95%", out)  # past CLAUDE_POOL_SWITCH_AT
+        self.assertIn("\033[31m95%", out)  # past CLAUDE_POOL_SWITCH_AT
         self.assertIn(f"\033[31m⚠ no next account until {until}", out)
+
+    def test_statusline_is_right_aligned_and_green_while_low(self):
+        now = time.time()
+        folder = self.banner_folder("a", {"a": "/s", "b": "/s"})
+        self.usage({"a": {"five_hour": 4, "resets_ts": now + 3600}, "b": {"five_hour": 75, "resets_ts": now + 3600}})
+        out = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="80").stdout
+        self.assertIn("\033[32m4%", out)
+        self.assertIn("\033[33m75%", out)  # b's use, from 70%
+        plain = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="80", NO_COLOR="1").stdout.rstrip("\n")
+        self.assertEqual(len(plain), 76)  # the terminal width less claude's indent and margin
+        self.assertTrue(plain.startswith(" ") and plain.endswith("next: b 75%"))
 
     def test_statusline_keeps_the_one_it_replaces(self):
         folder = self.banner_folder("a", {"a": "/s"}, statusline="echo OUTER")

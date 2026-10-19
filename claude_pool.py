@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -1036,8 +1036,8 @@ def live_usage(name, rate_limits):
 
 def banner(session, data, color=True):
     """The pool line under claude's prompt: the account, its 5-hour use and reset, the week when known, and the
-    account it moves to at the limit. Dim, with the 5-hour use yellow past CLAUDE_POOL_SWITCH_AT and a red warning
-    when there is no account left to move to."""
+    account it moves to at the limit. Usage is green while low, yellow from 70% and red from CLAUDE_POOL_SWITCH_AT,
+    with a red warning when there is no account left to move to. Right-aligned when the terminal width is known."""
     name, pool, now = session["account"], session.get("pool") or {}, time.time()
     rl = data.get("rate_limits") or {}
     if rl:
@@ -1045,27 +1045,50 @@ def banner(session, data, color=True):
     usage = load_usage()
     row = usage.get(name) or {}
     clock = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
+    level = lambda pct: "31" if pct >= env_num("CLAUDE_POOL_SWITCH_AT", 90) else "33" if pct >= 70 else "32"  # noqa: E731
     pieces = [("2", f"pool: {name}")]  # (color, text), joined by dim dots
     five, reset = row.get("five_hour"), row.get("resets_ts") or 0
     if five is not None and reset > now:
-        pieces += [("33" if five >= env_num("CLAUDE_POOL_SWITCH_AT", 90) else "2", f"{five:.0f}%"),
-                   ("2", f"resets {clock(reset)}")]
+        pieces += [(level(five), f"{five:.0f}%"), ("2", f"resets {clock(reset)}")]
     elif five is not None:  # the 5-hour window has reset since
-        pieces.append(("2", "0%"))
+        pieces.append(("32", "0%"))
     if row.get("seven_day") is not None and (row.get("seven_day_resets_ts") or 0) > now:
-        pieces.append(("2", f"week {row['seven_day']:.0f}%"))
+        pieces.append((level(row["seven_day"]), f"week {row['seven_day']:.0f}%"))
     here = (pool.get(name) or {}).get("sessions")
     others = {n: (v.get("kind"), None) for n, v in pool.items() if v.get("sessions") == here}
     nxt = choose(others, usage, skip={name}, now=now)
     if nxt:
         n5 = five_hour(usage.get(nxt) or {}, now)
-        pieces.append(("2", f"next: {nxt}" + (f" {n5:.0f}%" if n5 else "")))
+        pieces.append(("2", f"next: {nxt}"))
+        if n5:
+            pieces.append((level(n5), f"{n5:.0f}%"))
     else:
         resets = [r for r in (at_limit(usage.get(n) or {}, now) for n in others if n != name) if r]
         pieces.append(("31", "⚠ no next account" + (f" until {clock(min(resets))}" if resets else "")))
+    joined = [(pieces[0][1], pieces[0][0])]
+    for c, t in pieces[1:]:  # a next account's % sits right after its name, without a dot
+        joined.append((" " if t[0].isdigit() and joined[-1][0].startswith("next: ") else " · ", None))
+        joined.append((t, c))
+    plain = "".join(t for t, _ in joined)
+    pad = " " * max(0, terminal_width() - 4 - len(plain))  # claude indents the line and keeps a margin on the right
     if not color:
-        return " · ".join(t for _, t in pieces)
-    return "\033[2m · \033[0m".join(f"\033[{c}m{t}\033[0m" for c, t in pieces)
+        return pad + plain
+    return pad + "".join(f"\033[2m{t}\033[0m" if c is None else f"\033[{c}m{t}\033[0m" for t, c in joined)
+
+
+def terminal_width():
+    """The width of the terminal claude draws in: COLUMNS when set (0 = unknown), else the session's terminal.
+    The status line's own output is a pipe, so it asks /dev/tty."""
+    if os.environ.get("COLUMNS") is not None:
+        try:
+            return int(os.environ["COLUMNS"])
+        except ValueError:
+            return 0
+    try:
+        with open("CONOUT$" if WINDOWS else "/dev/tty") as tty:
+            return os.get_terminal_size(tty.fileno()).columns
+    except (OSError, ValueError):
+        return 0
 
 
 def statusline(folder):
