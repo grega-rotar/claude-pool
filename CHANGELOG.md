@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0
+
+- **Status line:** every interactive session shows `pool: <account> · <5-hour %> · resets <time> · next: <account>` under the prompt. The % turns yellow from 90%, and a red `⚠ no next account until <time>` appears when no other account is free. It uses the live numbers Claude Code gives its status line and saves them for the pool. Any status line you had, Orca's included, runs first and stays. `CLAUDE_POOL_BANNER=off` turns it off.
+
 ## 0.10.0
 
 - **Orca's accounts join the pool:** every Claude account logged in to [Orca](https://github.com/stablyai/orca) is an account named `orca-<name>`, with no `setup-token` step. claude runs in that account's Orca folder, and claude keeps the login fresh there. They're used in interactive sessions and `--pool-*` commands. Print mode leaves them out unless `CLAUDE_POOL_ORCA=on`, so scripts and services keep to their own accounts.

@@ -111,7 +111,7 @@ class PoolTest(unittest.TestCase):
             json.dump(rows, f)
 
     def run_pool(self, *args, stdin=None, cwd=None, **env):
-        return subprocess.run([sys.executable, POOL, *args], capture_output=True, text=True, input=stdin,
+        return subprocess.run([sys.executable, POOL, *args], capture_output=True, text=True, encoding="utf-8", input=stdin,
                               env={**self.env, **env}, timeout=30, cwd=cwd or self.tmp)
 
     def calls(self):
@@ -416,6 +416,63 @@ class PoolTest(unittest.TestCase):
         self.add("d", cfg, ext=".dir")
         self.run_pool("-p", "hi")
         self.assertEqual((self.calls()[-1]["token"], self.calls()[-1]["config_dir"]), ("tok-d", cfg))
+
+    # --- status line ---------------------------------------------------------------------------------------
+
+    def banner_folder(self, account, pool, statusline=None):
+        folder = os.path.join(self.tmp, "banner")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "session.json"), "w") as f:
+            json.dump({"account": account, "pool": {n: {"kind": "token", "sessions": s} for n, s in pool.items()}}, f)
+        if statusline:
+            with open(os.path.join(folder, "statusline.json"), "w") as f:
+                json.dump({"type": "command", "command": statusline}, f)
+        return folder
+
+    def test_statusline_shows_account_usage_reset_and_next(self):
+        now = time.time()
+        folder = self.banner_folder("a", {"a": "/s", "b": "/s", "c": "/other"})
+        self.usage({"b": {"five_hour": 12, "resets_ts": now + 3600}, "c": {"five_hour": 1, "resets_ts": now + 3600}})
+        live = {"rate_limits": {"five_hour": {"used_percentage": 85.4, "resets_at": int(now) + 7200},
+                                "seven_day": {"used_percentage": 40, "resets_at": int(now) + 90000}}}
+        r = self.run_pool("--pool-statusline", folder, stdin=json.dumps(live), NO_COLOR="1")
+        at = time.strftime("%H:%M", time.localtime(int(now) + 7200))
+        # c can't see this session's conversations, so it is never next.
+        self.assertEqual(r.stdout, f"pool: a · 85% · resets {at} · week 40% · next: b 12%\n")
+        row = self.read_usage()["a"]  # the live numbers are kept for every caller
+        self.assertEqual((row["five_hour"], row["seven_day"], row["resets_ts"]), (85.4, 40, int(now) + 7200))
+
+    def test_statusline_warns_in_red_with_no_next_account(self):
+        now = time.time()
+        folder = self.banner_folder("a", {"a": "/s", "b": "/s"})
+        self.usage({"a": {"five_hour": 95, "resets_ts": now + 3600}, "b": {"status": "rejected", "resets_ts": now + 1800}})
+        out = self.run_pool("--pool-statusline", folder, stdin="{}").stdout
+        until = time.strftime("%H:%M", time.localtime(now + 1800))
+        self.assertIn("\033[33m95%", out)  # past CLAUDE_POOL_SWITCH_AT
+        self.assertIn(f"\033[31m⚠ no next account until {until}", out)
+
+    def test_statusline_keeps_the_one_it_replaces(self):
+        folder = self.banner_folder("a", {"a": "/s"}, statusline="echo OUTER")
+        lines = self.run_pool("--pool-statusline", folder, stdin="{}", NO_COLOR="1").stdout.splitlines()
+        self.assertEqual(lines[0], "OUTER")
+        self.assertTrue(lines[1].startswith("pool: a"))
+        # Without one in --settings, the settings files' status line runs (Orca's lives in the config folder).
+        cfg = os.path.join(self.tmp, "cfg")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "settings.json"), "w") as f:
+            json.dump({"statusLine": {"type": "command", "command": "echo FROM-CONFIG"}}, f)
+        os.remove(os.path.join(folder, "statusline.json"))
+        out = self.run_pool("--pool-statusline", folder, stdin="{}", CLAUDE_CONFIG_DIR=cfg).stdout
+        self.assertEqual(out.splitlines()[0], "FROM-CONFIG")
+
+    def test_session_gets_the_status_line(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.run_pool("--settings", '{"statusLine": {"type": "command", "command": "mine"}}', "hi")
+        s = self.sessions()[-1]["settings"]
+        self.assertIn("--pool-statusline", s["statusLine"]["command"])
+        self.run_pool("hi", CLAUDE_POOL_BANNER="off")
+        self.assertNotIn("statusLine", self.sessions()[-1]["settings"])
 
     def test_short_rate_limit_does_not_switch(self):
         self.add("a", "blip-a")
