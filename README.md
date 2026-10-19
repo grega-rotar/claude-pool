@@ -12,7 +12,7 @@ claude-pool -p "fix the tests"    # print mode, like `claude -p`
 ## What it does
 
 - **Sessions switch on their own.** When the account hits its limit, claude-pool resumes the same conversation on the next free account and tells it to carry on. The history and every tool result come along, so nothing runs twice. A refused token is handled the same way.
-- **You always see where you are.** A line under the prompt shows the account, how much of its 5 hours is used, when that resets, and where the session goes next. It turns red when there's nowhere left to go:
+- **You always see where you are.** A line in the bottom-right corner, under the prompt, shows the account, how much of its 5 hours is used, when that resets, and where the session goes next. Usage is green while low, yellow from 70% and red from 90%, and a red warning shows when there's nowhere left to go:
 
   ```
   pool: editors2 · 85% · resets 23:10 · next: factory 12%
