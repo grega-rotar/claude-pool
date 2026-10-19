@@ -46,6 +46,6 @@ claude-pool -p "hi"
 
 Anything else goes to `claude` unchanged.
 
-More: [settings](docs/settings.md), [how it works](docs/how-it-works.md), [servers](docs/server.md).
+More: [where things live and doing it by hand](docs/manual.md), [settings](docs/settings.md), [how it works](docs/how-it-works.md), [servers](docs/server.md).
 
 Using several accounts to get around usage limits breaks Anthropic's terms. MIT.
