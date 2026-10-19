@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -414,7 +414,15 @@ def broken(row, now=None):
 PROBE = ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", "", "--system-prompt", "Reply ok.",
          "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
          "--output-format", "stream-json", "--verbose"]
-AUTH_ERROR = re.compile(r"(?i)authenticat|invalid.{0,20}(token|key|bearer)|401|unauthori|expired|revoked")
+AUTH_ERROR = re.compile(r"(?i)authenticat|invalid.{0,20}(token|key|bearer)|401|unauthori|expired|revoked"
+                        r"|disabled .{0,40}access|not_allowed_for_organization")
+
+
+def refused(final):
+    """The account's token was refused (logged out, revoked, subscription access turned off for the org). claude
+    reports some of these as subtype "success" with is_error true and an HTTP status."""
+    return bool(final.get("is_error")) and (final.get("api_error_status") in (401, 403) or bool(
+        AUTH_ERROR.search(f"{final.get('api_error_code') or ''} {final.get('result') or ''}")))
 
 
 def parse_events(events):
@@ -451,6 +459,10 @@ def probe(name, kind, secret, binary):
         record(name, info, ran=False)
         return "ok"
     error = str(final.get("result") or err.strip() or "no reply")[:300]
+    if refused(final) or AUTH_ERROR.search(error):
+        record(name, None, ran=False, error=error)
+        log("token_broken", account=name, error=error, message=f"the token of {name} was refused: {error}")
+        return "broken"
     if final.get("subtype") == "success" and kind == "login":  # logged in with an API key: no usage windows
         touch(name)
         return "no_usage"
@@ -459,10 +471,6 @@ def probe(name, kind, secret, binary):
         touch(name)
         log("cli_changed", account=name, message="claude answered but printed no rate_limit_event; usage can't be read")
         return "no_usage"
-    if AUTH_ERROR.search(error):
-        record(name, None, ran=False, error=error)
-        log("token_broken", account=name, error=error, message=f"the token of {name} was refused: {error}")
-        return "broken"
     touch(name)
     log("probe_failed", account=name, error=error, message=f"usage check of {name} failed: {error}")
     return "failed"
@@ -691,7 +699,12 @@ def run(args):
             final["pool_account"] = name
             if switched:
                 final["pool_switched"] = switched
-        limited = bool(name) and cut_off(final, info)
+        bad = bool(name) and not ok and refused(final)
+        if bad:  # skipped until rechecked, and the run goes to the next account: a refused run did nothing
+            error = str(final.get("result") or "refused")[:300]
+            record(name, None, ran=False, error=error)
+            log("token_broken", account=name, error=error, message=f"the token of {name} was refused: {error}")
+        limited = bool(name) and (bad or cut_off(final, info))
         if name and not ok:
             # The raw shape of every failure, so a real limit cut-off can be checked against what cut_off() expects.
             log("cut_off" if limited else "run_failed", account=name, exit=code, subtype=final.get("subtype"),
@@ -712,7 +725,7 @@ def run(args):
         if not nxt:
             emit(fmt, verbose, events, final)
             return code
-        print(f"claude-pool: {name} hit its usage limit; rerunning on {nxt}", file=sys.stderr)
+        print(f"claude-pool: {name} {'was refused' if bad else 'hit its usage limit'}; rerunning on {nxt}", file=sys.stderr)
         log("switch", account=name, to=nxt)
         if fmt == "stream-json":
             print(json.dumps({"type": "system", "subtype": "pool_switch", "from": name, "to": nxt}), flush=True)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-pool"
-version = "0.8.0"
+version = "0.8.1"
 description = "Drop-in wrapper for the Claude Code CLI that runs each call on the account with the most usage left"
 readme = "README.md"
 license = {text = "MIT"}

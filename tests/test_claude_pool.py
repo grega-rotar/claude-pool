@@ -27,6 +27,11 @@ out({"type": "system", "subtype": "init"})
 if tok.startswith("bad"):
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Invalid bearer token"})
     sys.exit(1)
+if tok.startswith("orgoff"):  # claude reports this one as "success" with is_error and a 403
+    out({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 403,
+         "api_error_code": "oauth_not_allowed_for_organization",
+         "result": "Your organization has disabled Claude subscription access for Claude Code"})
+    sys.exit(1)
 if tok.startswith("net"):
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "API Error: Connection error."})
     sys.exit(1)
@@ -279,6 +284,24 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(r.stdout, "echo:hi\n")
         self.assertEqual(self.calls()[-1]["token"], "tok-b")
         self.assertIn("broken: Invalid bearer token", self.run_pool("--pool-status").stdout)
+
+    def test_org_refused_token_is_marked_broken_and_run_moves_on(self):
+        self.add("a", "orgoff-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 86400}, "b": {"seven_day": 5}})
+        r = self.run_pool("-p", "hi")
+        self.assertEqual(r.stdout, "echo:hi\n")
+        self.assertEqual([c["token"] for c in self.calls()], ["orgoff-a", "tok-b"])
+        self.assertIn("broken: Your organization has disabled", self.run_pool("--pool-status").stdout)
+        self.run_pool("-p", "hi")
+        self.assertEqual(self.calls()[-1]["token"], "tok-b")
+        self.assertEqual(len(self.calls()), 3)
+
+    def test_check_marks_org_refused_token_broken(self):
+        self.add("a", "orgoff-a")
+        r = self.run_pool("--pool-check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("token refused", r.stdout)
 
     def test_pool_refresh_probes_every_account(self):
         self.add("a", "tok-a")
