@@ -3,7 +3,8 @@ r"""claude-pool: run `claude` on whichever of your accounts has the most usage l
 
 Drop-in for the Claude Code CLI: `claude-pool -p "hi" --output-format json` takes the same arguments and prints
 the same output as `claude`. Before each run it picks a free account, and in print mode (-p) a run cut off by a
-usage limit is rerun on the next free account (by default only when it ran no tools yet).
+usage limit is rerun on the next free account (by default only when it ran no tools yet). An interactive session
+that hits a usage limit goes on by itself on the next free account: same conversation, resumed with a nudge.
 
 Accounts: one file per account in $CLAUDE_POOL_DIR (default ~/.config/claude-pool, on Windows %APPDATA%\claude-pool):
   <name>.token   an OAuth token from `claude setup-token` (Claude subscription)
@@ -41,7 +42,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -81,6 +82,8 @@ Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optio
   CLAUDE_POOL_FRESH        seconds between usage checks, 0 = off (300)
   CLAUDE_POOL_LIMIT        % at which an account counts as full (100)
   CLAUDE_POOL_RERUN        after a limit cut-off: safe (only if no tools ran), always, never (safe)
+  CLAUDE_POOL_SWITCH       off = an interactive session stays on its first account (on)
+  CLAUDE_POOL_RESUME_PROMPT what a switched session is told first; empty = nothing, wait for you
   CLAUDE_POOL_ALERT        shell command run on problems, with CLAUDE_POOL_EVENT and CLAUDE_POOL_MESSAGE set
 
 Exit code 75: every account is full. More: https://github.com/grega-rotar/claude-pool"""
@@ -733,10 +736,323 @@ def run(args):
         name = nxt
 
 
-def parse_events(events):
-    info = next((e.get("rate_limit_info") for e in reversed(events) if e.get("type") == "rate_limit_event"), None)
-    final = next((e for e in reversed(events) if e.get("type") == "result"), {})
-    return info, final
+# Interactive sessions. claude-pool starts claude with a StopFailure hook (--settings) that writes the failure to a
+# file. When the failure is a usage limit, claude is stopped and started again on the next account with
+# `--resume <session> "<prompt>"`: the conversation, tool results included, carries over, so nothing runs twice.
+
+USAGE_LIMIT = re.compile(r"(?i)hit your .{0,40}limit|usage limit")
+RESUME_PROMPT = "Continue where you left off. Your last turn was cut off by a usage limit."
+# Flags that start a session elsewhere, return at once or turn hooks off: claude gets the terminal to itself.
+EXEC_FLAGS = {"-h", "--help", "-v", "--version", "--bg", "--background", "--desktop", "--cloud", "--environment",
+              "--teleport", "--bare", "--safe-mode"}
+# Flags that pick or make the session: dropped on a switch, since --resume <id> takes their place.
+SESSION_FLAGS = {"-c", "--continue", "-r", "--resume", "--session-id", "--fork-session", "--from-pr", "-w",
+                 "--worktree", "--tmux"}
+# Used when `claude --help` can't be read: flag -> "one" value, "many" (<x...>) or "optional" ([x]).
+CLI_FALLBACK = {
+    "flags": {"--add-dir": "many", "--agent": "one", "--agents": "one", "--allowedTools": "many",
+              "--allowed-tools": "many", "--append-system-prompt": "one", "--autocompact": "one", "--betas": "many",
+              "--cloud": "optional", "-d": "optional", "--debug": "optional", "--debug-file": "one",
+              "--disallowedTools": "many", "--disallowed-tools": "many", "--effort": "one", "--environment": "one",
+              "--fallback-model": "one", "--file": "many", "--from-pr": "optional", "--input-format": "one",
+              "--json-schema": "one", "--max-budget-usd": "one", "--mcp-config": "many", "--model": "one",
+              "-n": "one", "--name": "one", "--output-format": "one", "--permission-mode": "one",
+              "--permission-prompts": "one", "--plugin-dir": "one", "--plugin-url": "one",
+              "--prompt-suggestions": "optional", "--remote-control": "optional",
+              "--remote-control-session-name-prefix": "one", "-r": "optional", "--resume": "optional",
+              "--session-id": "one", "--setting-sources": "one", "--settings": "one", "--system-prompt": "one",
+              "--system-prompt-snapshot": "one", "--teleport": "optional", "--tools": "many", "-w": "optional",
+              "--worktree": "optional"},
+    "commands": ["agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp",
+                 "plugin", "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview",
+                 "update", "upgrade"]}
+
+
+def parse_help(text):
+    """{"flags": {flag: arity}, "commands": [...]} from `claude --help`."""
+    flags, commands, section = {}, [], None
+    for line in text.splitlines():
+        if re.match(r"\S", line):
+            section = line.strip().rstrip(":").lower()
+            continue
+        m = re.match(r"  (\S.*?)(?:\s{2,}|$)", line)
+        if not m:
+            continue
+        if section == "options":
+            spec = m.group(1)
+            arg = re.search(r" (<[^>]*>|\[[^\]]*\])$", spec)
+            arity = None if not arg else "optional" if arg.group(1)[0] == "[" else "many" if "..." in arg.group(1) else "one"
+            for flag in re.findall(r"(?<![\w-])(--?[\w-]+)", spec[:arg.start()] if arg else spec):
+                if arity:
+                    flags[flag] = arity
+        elif section == "commands":
+            commands += m.group(1).split()[0].split("|")
+    return {"flags": flags, "commands": commands}
+
+
+def cli_spec(binary):
+    """claude's flags and commands, read from its --help once per claude version and cached next to the usage file."""
+    try:
+        st = os.stat(binary)
+        key = f"{os.path.realpath(binary)}:{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return CLI_FALLBACK
+    path = os.path.join(os.path.dirname(state_path()), "cli.json")
+    try:
+        with open(path) as f:
+            cached = json.load(f)
+        if cached.get("key") == key:
+            return cached
+    except (OSError, ValueError):
+        pass
+    try:
+        text = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return CLI_FALLBACK
+    spec = parse_help(text)
+    if not spec["flags"] or not spec["commands"]:
+        return CLI_FALLBACK
+    spec["key"] = key
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(spec, f)
+        share(path + ".tmp")
+        replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return spec
+
+
+def split_args(args, spec):
+    """claude's args as [(flag or None, [values])]: a flag with what it takes, or None with a positional (the
+    prompt, or a command). Follows claude's own parsing: --x=v, a [value] only when the next arg isn't a flag,
+    <values...> up to the next flag, and everything after "--" positional."""
+    out, i, flags = [], 0, spec["flags"]
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out += [(None, [x]) for x in args[i + 1:]]
+            break
+        name = a.split("=", 1)[0] if a.startswith("--") else a
+        if not a.startswith("-") or a == "-":
+            out.append((None, [a]))
+            i += 1
+            continue
+        arity = flags.get(name)
+        j = i + 1
+        if "=" in a or arity is None:
+            pass
+        elif arity == "one":
+            j = min(i + 2, len(args))
+        else:
+            while j < len(args) and not args[j].startswith("-") and (arity == "many" or j == i + 1):
+                j += 1
+        out.append((a, args[i + 1:j]))
+        i = j
+    return out
+
+
+def session_mode(args, spec):
+    """True when the args start an interactive session in this terminal, which claude-pool can switch."""
+    parts = split_args(args, spec)
+    if any(f and f.split("=", 1)[0] in EXEC_FLAGS for f, _ in parts):
+        return False
+    first = next((v[0] for f, v in parts if f is None), None)
+    return first not in spec["commands"]
+
+
+def resume_args(args, spec, session, prompt):
+    """The args to go on with `session` on another account: the caller's flags (MCP config, --add-dir, model... are
+    not kept by a resume), without the prompt and the flags that picked or made the session."""
+    keep = []
+    for f, values in split_args(args, spec):
+        if f is None or f.split("=", 1)[0] in SESSION_FLAGS:
+            continue
+        keep += [f] + values
+    return keep + ["--resume", session] + ([prompt] if prompt else [])
+
+
+def with_hook(args, spec, settings_path, hook_file):
+    """The args with our StopFailure hook added through --settings, merged into the caller's own --settings."""
+    hook_cmd = " ".join(f'"{p}"' for p in (sys.executable, os.path.abspath(__file__)))
+    hook_cmd += f' --pool-hook "{hook_file}"'
+    if WINDOWS:  # claude runs hooks in a POSIX shell (Git Bash) there: forward slashes stay paths
+        hook_cmd = hook_cmd.replace("\\", "/")
+    settings, out = {}, []
+    for f, values in split_args(args, spec):
+        if f and f.split("=", 1)[0] == "--settings":
+            raw = f.split("=", 1)[1] if "=" in f else (values[0] if values else "")
+            try:
+                if raw.lstrip().startswith("{"):
+                    settings = json.loads(raw)
+                else:
+                    with open(os.path.expanduser(raw), encoding="utf-8") as fh:
+                        settings = json.load(fh)
+            except (OSError, ValueError) as e:
+                sys.exit(f"claude-pool: can't read --settings {raw!r}: {e}")
+            continue
+        out += ([f] if f else []) + values
+    hooks = settings.setdefault("hooks", {})
+    hooks["StopFailure"] = list(hooks.get("StopFailure") or []) + [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+    with open(settings_path, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh)
+    return ["--settings", settings_path] + out, settings
+
+
+def hooks_run():
+    """claude can run our hook: always on macOS and Linux; on Windows only with Git Bash, which runs its hooks."""
+    if not WINDOWS:
+        return True
+    bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if bash and os.path.isfile(bash):
+        return True
+    return any(os.path.isfile(os.path.join(os.environ.get(v) or "", "Git", "bin", "bash.exe"))
+               for v in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA")) or bool(shutil.which("bash"))
+
+
+def hook(path):
+    """--pool-hook <file>: claude's StopFailure hook. Saves the hook's input for the session's claude-pool."""
+    data = sys.stdin.read()
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            f.write(data)
+        replace(path + ".tmp", path)
+    except OSError:
+        pass
+    return 0
+
+
+def read_failure(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            failure = json.load(f)
+        os.remove(path)
+        return failure
+    except (OSError, ValueError):
+        return None
+
+
+REFUSED_ERRORS = {"authentication_failed", "oauth_org_not_allowed", "account_on_hold", "billing_error"}
+
+
+def refused_failure(name, failure):
+    """The account itself was refused (token revoked, org access off, on hold, no credit): skipped until rechecked."""
+    if failure.get("error") not in REFUSED_ERRORS:
+        return False
+    error = str(failure.get("last_assistant_message") or failure.get("error"))[:300]
+    record(name, None, ran=False, error=error)
+    log("token_broken", account=name, error=error, message=f"the token of {name} was refused: {error}")
+    return True
+
+
+def usage_limited(name, pool, failure):
+    """The failure is the account's usage limit, not a short rate limit claude retries by itself. The account is
+    checked either way, so every caller sees its new numbers."""
+    if failure.get("error") != "rate_limit":
+        return False
+    if pool[name][0] in ("token", "login"):
+        refresh({name: pool[name]}, names=[name])
+    text = f"{failure.get('last_assistant_message') or ''} {failure.get('error_details') or ''}"
+    if at_limit(load_usage().get(name) or {}):
+        return True
+    if not USAGE_LIMIT.search(text):
+        return False
+    # claude says limit but the check didn't show it (it failed, or a per-model limit): full for 15 minutes.
+    with usage_update() as usage:
+        row = usage.setdefault(name, {})
+        row["status"] = "rejected"
+        if (row.get("resets_ts") or 0) <= time.time():
+            row["resets_ts"] = time.time() + 900
+    return True
+
+
+def stop(p):
+    if p.poll() is None:
+        p.terminate()  # claude saves the conversation and puts the terminal back on SIGTERM
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+
+def interactive(args, pool, name, binary, spec):
+    """Run an interactive claude on `name`, and move the session to the next account each time a usage limit
+    stops it. Returns claude's exit code."""
+    tmp = tempfile.mkdtemp(prefix="claude-pool-")
+    hook_file = os.path.join(tmp, "stop-failure.json")
+    args, settings = with_hook(args, spec, os.path.join(tmp, "settings.json"), hook_file)
+    if settings.get("disableAllHooks"):
+        print("claude-pool: your --settings turn hooks off; this session can't switch accounts", file=sys.stderr)
+    prompt = os.environ.get("CLAUDE_POOL_RESUME_PROMPT", RESUME_PROMPT)
+    tty = None
+    if not WINDOWS and sys.stdin is not None and sys.stdin.isatty():
+        import termios
+        tty = termios.tcgetattr(sys.stdin.fileno())
+    p, cwd, switches, stopping = None, None, 0, []
+
+    def forward(sig, _frame):  # a terminate or hang-up is passed on, and the session ends there
+        stopping.append(sig)
+        if p and p.poll() is None:
+            p.terminate() if WINDOWS else p.send_signal(sig)
+    # The terminal sends Ctrl+C to us and claude alike: only claude acts on it.
+    sigs = {s: forward for s in (getattr(signal, n, None) for n in ("SIGTERM", "SIGHUP")) if s}
+    # A no-op handler, not SIG_IGN: an ignored signal would stay ignored in claude and the commands it runs.
+    sigs.update({s: lambda _s, _f: None for s in (getattr(signal, n, None) for n in ("SIGINT", "SIGQUIT")) if s})
+    old = {s: signal.signal(s, h) for s, h in sigs.items()}
+    try:
+        while True:
+            mark_running(name, True)
+            log("session", account=name, resumed=switches > 0)
+            p = subprocess.Popen([binary] + args, env=account_env(*pool[name]), cwd=cwd)
+            nxt = None
+            while p.poll() is None:
+                try:
+                    p.wait(0.25)
+                except subprocess.TimeoutExpired:
+                    pass
+                failure = read_failure(hook_file) if os.path.exists(hook_file) else None
+                if not failure or not failure.get("session_id") or stopping:
+                    continue
+                why = "was refused" if refused_failure(name, failure) else "hit its usage limit" if usage_limited(
+                    name, pool, failure) else None
+                if not why:
+                    continue
+                nxt = choose(pool, load_usage(), skip={name})
+                if not nxt and why == "was refused":
+                    log("switch_failed", account=name, message=f"{name} was refused and no other account is free")
+                    continue
+                if not nxt:  # claude waits for the reset and goes on by itself
+                    resets = [r for r in (at_limit(load_usage().get(n) or {}) for n in pool) if r]
+                    when = datetime.fromtimestamp(min(resets), timezone.utc).isoformat() if resets else "unknown"
+                    log("exhausted", account=name, resets_at=when,
+                        message=f"every account is at its usage limit (first reset {when}); the session waits")
+                    continue
+                time.sleep(1)  # the hook runs as the turn ends: give claude a moment to finish writing it
+                if p.poll() is not None or stopping:  # you quit meanwhile: don't start it again
+                    nxt = None
+                    break
+                stop(p)
+                break
+            mark_running(name, False)
+            if not nxt:
+                return p.returncode if p.returncode >= 0 else 128 - p.returncode  # killed by a signal: as a shell says
+            if tty:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty)
+            log("switch", account=name, to=nxt, session=failure["session_id"], reason=failure.get("error"))
+            print(f"\nclaude-pool: {name} {why}; going on with {nxt}", file=sys.stderr, flush=True)
+            switches += 1
+            cwd = failure.get("cwd") or cwd  # with --worktree the session lives in the worktree
+            args = resume_args(args, spec, failure["session_id"], prompt)
+            name = nxt
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+        if p and p.poll() is None:
+            stop(p)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def status():
@@ -931,8 +1247,10 @@ def check():
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
-    load_dotenv()
     cmd, rest = (args[0], args[1:]) if args else (None, [])
+    if cmd == "--pool-hook":  # first: claude waits on it, so no .env or account reads
+        return hook(rest[0]) if rest else 1
+    load_dotenv()
     if cmd == "--pool-help":
         print(HELP.format(version=__version__, dir=pool_dir(), state=state_path(), log=log_path()))
         return 0
@@ -961,13 +1279,21 @@ def main(argv=None):
         sys.exit(f"claude-pool: unknown command {cmd}; see claude-pool --pool-help")
     if "-p" in args or "--print" in args:
         return run(args)
-    # Interactive or a subcommand: pick the account and hand over to claude.
+    # Interactive or a subcommand: pick the account. A session that can move to another account at a usage limit
+    # runs under claude-pool; anything else gets claude to itself.
     pool = accounts()
-    if not os.environ.get("CLAUDE_POOL_ACCOUNT") and fresh_secs() > 0:
+    forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
+    if not forced and fresh_secs() > 0:
         refresh(pool, stale_only=True)
-    name = os.environ.get("CLAUDE_POOL_ACCOUNT") or choose(pool, load_usage())
+    name = forced or choose(pool, load_usage())
     env = account_env(*pool[name]) if name in pool else child_env()
     binary = real_binary()
+    if (name in pool and not forced and len(pool) > 1 and os.environ.get("CLAUDE_POOL_SWITCH", "on") != "off"
+            and session_mode(args, cli_spec(binary))):
+        if hooks_run():
+            return interactive(args, pool, name, binary, cli_spec(binary))
+        print("claude-pool: Git Bash not found, so this session can't switch accounts at a usage limit "
+              "(install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH)", file=sys.stderr)
     if name in pool:
         mark_running(name, True)  # exec keeps our pid, so the mark lives as long as the session
     if WINDOWS:  # no real exec on Windows: run it and pass its exit code on

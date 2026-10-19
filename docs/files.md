@@ -19,4 +19,8 @@ Delete `usage.json`. The next run or `claude-pool --pool-refresh` checks every a
 
 ## Update claude-pool
 
-Run the install line from the README again. It replaces the one file. Accounts, usage and settings stay.
+Run the install line from the README again. It replaces the one file. Accounts, usage and settings stay. With pip, add `--upgrade`; with pipx, run `pipx upgrade claude-pool`.
+
+## Uninstall
+
+Delete `~/.local/bin/claude-pool` (or `pip uninstall claude-pool`, `pipx uninstall claude-pool`). To remove your accounts and usage too, delete the folders in the table above.

@@ -16,6 +16,8 @@ All optional. Set them as environment variables or as lines in a `.env`.
 | `CLAUDE_POOL_FRESH` | `300` | Seconds between usage checks, `0` = off |
 | `CLAUDE_POOL_LIMIT` | `100` | % that counts as full |
 | `CLAUDE_POOL_RERUN` | `safe` | After a limit cut-off: `safe` (only if no tools ran), `always`, `never` |
+| `CLAUDE_POOL_SWITCH` | `on` | `off` = an interactive session stays on its first account |
+| `CLAUDE_POOL_RESUME_PROMPT` | Continue where you left off. … | What a switched session is told first; empty = nothing, you type |
 | `CLAUDE_POOL_ALERT` | | Command run on problems, gets `$CLAUDE_POOL_MESSAGE` |
 | `CLAUDE_POOL_LOG` | next to the usage file | Event log |
 
@@ -37,7 +39,7 @@ claude-pool reads the first `.env` it finds, from the current folder up. Only `C
 
 ## Alerts
 
-`CLAUDE_POOL_ALERT` runs when every account is full, a token is refused, claude stops reporting usage, or a cut-off run isn't rerun. Each problem alerts at most once an hour.
+`CLAUDE_POOL_ALERT` runs when every account is full, a token is refused, a session can't move on from a refused token, claude stops reporting usage, or a cut-off run isn't rerun. Each problem alerts at most once an hour.
 
 ```sh
 CLAUDE_POOL_ALERT='curl -s -d "{\"text\": \"$CLAUDE_POOL_MESSAGE\"}" https://hooks.slack.com/services/...'

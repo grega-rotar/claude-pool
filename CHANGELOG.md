@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+
+- **Interactive sessions switch accounts:** when a session hits its usage limit, or its token is refused, claude-pool resumes the same conversation on the next free account and tells it to continue. Your flags carry over, and the restart happens in the session's own folder (its worktree with `-w`). It works through a `StopFailure` hook passed with `--settings`, merged into your own `--settings` if you pass one. `CLAUDE_POOL_SWITCH=off` turns it off, and `CLAUDE_POOL_RESUME_PROMPT` changes the nudge.
+- Commands (`claude mcp`...), `--version`, `--bg`, `--bare` and `--safe-mode` go to claude unchanged.
+- On Windows, switching needs Git Bash, which Claude Code runs hooks in. Without it the session runs on one account and says so.
+- New events: `session`, `switch_failed` (a refused token with no other account, alerted).
+- README: install for macOS, Linux, WSL and Windows; use it as `claude`; update and uninstall.
+
 ## 0.8.2
 
 - **Readable status table:** `--pool-status` and `--pool-watch` show usage as `67%`, resets in local time with how long is left (`20:20 (in 2h55m)`), and a status column (`next`, `full until 20:20`, `2 running`, `broken: <reason>`). Column widths fit the content, and a broken token's reason is cut to one line; the full error stays in `--pool-check` and `--pool-log`.

@@ -36,6 +36,4 @@ Copy the same token files to each server. Each sees the others' use at the 5-min
 
 ## Windows
 
-```powershell
-py -m pip install git+https://github.com/grega-rotar/claude-pool
-```
+Install it as the README says. A Windows service user needs Python and Claude Code on its own `PATH`.

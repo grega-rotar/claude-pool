@@ -9,7 +9,7 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 | `claude-pool --pool-status` | Every account with its usage, when it resets, and which one runs next |
 | `claude-pool --pool-watch [minutes]` | The same table, checked again every 5 minutes (or the minutes given) until Ctrl+C |
 | `claude-pool --pool-refresh [name..]` | Check the usage of every account (or the named ones) now |
-| `claude-pool --pool-log [N]` | The last N events (default 20): runs, switches, errors |
+| `claude-pool --pool-log [N]` | The last N events (default 20): runs, sessions, switches, errors |
 
 ## Set up
 

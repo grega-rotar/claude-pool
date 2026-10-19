@@ -13,13 +13,38 @@ POOL = os.path.join(ROOT, "claude_pool.py")
 
 # The fake claude acts on the token it gets: "limit*" is cut off by a usage limit, anything else succeeds.
 # It logs its args and token, and echoes the prompt (last arg, or stdin) back as the result.
+# Interactive (no -p): it runs the StopFailure hook from --settings as claude does, then waits to be stopped:
+# "limit*" with a usage limit, "orgoff*" refused, "blip*" a short rate limit. Other tokens just exit.
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, shlex, subprocess, sys, time
 args = sys.argv[1:]
+if args == ["--help"]:
+    print("Usage: claude [options] [command] [prompt]\n\nOptions:\n  --model <model>  Model\n  --add-dir <directories...>  Dirs\n"
+          "  -r, --resume [value]  Resume\n  -c, --continue  Continue\n  --settings <file-or-json>  Settings\n"
+          "  -w, --worktree [name]  Worktree\n  -v, --version  Version\n\nCommands:\n  mcp  MCP\n  update|upgrade  Update")
+    sys.exit(0)
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
+settings = None
+if "--settings" in args:
+    with open(args[args.index("--settings") + 1]) as f:
+        settings = json.load(f)
 os.makedirs(os.environ["FAKE_LOG"], exist_ok=True)  # one file per call: parallel calls can't lose a line
 with open(os.path.join(os.environ["FAKE_LOG"], "%020d-%d.json" % (time.time_ns(), os.getpid())), "w") as f:
-    f.write(json.dumps({"args": args, "token": tok, "pool_secrets": sorted(k for k in os.environ if k.startswith(("CLAUDE_POOL_TOKEN_", "CLAUDE_POOL_KEY_")))}))
+    f.write(json.dumps({"args": args, "token": tok, "settings": settings, "cwd": os.getcwd(),
+                        "pool_secrets": sorted(k for k in os.environ if k.startswith(("CLAUDE_POOL_TOKEN_", "CLAUDE_POOL_KEY_")))}))
+if "-p" not in args:
+    failure = {"limit": ("rate_limit", "You've hit your session limit"),
+               "orgoff": ("oauth_org_not_allowed", "Your organization has disabled Claude subscription access"),
+               "blip": ("rate_limit", "API Error: Rate limit reached")}.get(tok.split("-")[0])
+    if failure and settings:
+        payload = {"session_id": "sess-1", "hook_event_name": "StopFailure", "error": failure[0],
+                   "last_assistant_message": failure[1], "cwd": os.environ.get("FAKE_SESSION_CWD", os.getcwd())}
+        for entry in settings["hooks"]["StopFailure"]:
+            for h in entry["hooks"]:
+                subprocess.run(shlex.split(h["command"]), input=json.dumps(payload), text=True)
+        time.sleep(float(os.environ.get("FAKE_WAIT", "15")))  # a session at the limit waits for the reset
+    print("session done on " + tok)
+    sys.exit(0)
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
@@ -241,6 +266,154 @@ class PoolTest(unittest.TestCase):
         self.run_pool("--version")
         c = self.calls()[0]
         self.assertEqual((c["args"], c["token"]), (["--version"], "tok-a"))
+
+    def read_usage(self):
+        with open(self.state) as f:
+            return json.load(f)
+
+    def sessions(self):
+        return [c for c in self.calls() if "-p" not in c["args"]]
+
+    def test_session_moves_to_next_account_at_usage_limit(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600}})
+        r = self.run_pool("fix the bug", "--model", "haiku", "--add-dir", "x", "y", "-c")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("a hit its usage limit; going on with b", r.stderr)
+        first, second = self.sessions()
+        self.assertEqual(first["token"], "limit-a")
+        self.assertEqual(first["args"][2:], ["fix the bug", "--model", "haiku", "--add-dir", "x", "y", "-c"])
+        self.assertEqual(second["token"], "tok-b")
+        # The caller's flags again (a resume doesn't keep them), not the prompt or -c, then the session and a nudge.
+        self.assertEqual(second["args"][2:], ["--model", "haiku", "--add-dir", "x", "y", "--resume", "sess-1",
+                                              "Continue where you left off. Your last turn was cut off by a usage limit."])
+        self.assertEqual(second["args"][:2], first["args"][:2])  # the same --settings with the hook
+        self.assertEqual(self.read_usage()["a"]["status"], "rejected")  # checked, so every caller sees it
+        events = [e["event"] for e in self.events()]
+        self.assertIn("switch", events)
+        self.assertFalse(os.path.exists(first["args"][1]), "the session's temp folder is removed")
+        self.assertFalse(self.read_usage()["b"].get("running"))
+
+    def test_session_moves_on_from_a_refused_token_and_marks_it(self):
+        self.add("a", "orgoff-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600}})
+        r = self.run_pool("hi")
+        self.assertIn("a was refused; going on with b", r.stderr)
+        self.assertEqual([c["token"] for c in self.sessions()], ["orgoff-a", "tok-b"])
+        self.assertIn("disabled", self.read_usage()["a"]["error"])
+
+    def test_session_chain_and_custom_resume_prompt(self):
+        self.add("a", "limit-a")
+        self.add("b", "limit-b")
+        self.add("c", "tok-c")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600},
+                    "b": {"seven_day": 50, "seven_day_resets_ts": time.time() + 7200}})
+        self.run_pool("hi", CLAUDE_POOL_RESUME_PROMPT="go on")
+        a, b, c = self.sessions()
+        self.assertEqual([x["token"] for x in (a, b, c)], ["limit-a", "limit-b", "tok-c"])
+        self.assertEqual(c["args"][2:], ["--resume", "sess-1", "go on"])
+
+    def test_short_rate_limit_does_not_switch(self):
+        self.add("a", "blip-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600}})
+        r = self.run_pool("hi", FAKE_WAIT="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c["token"] for c in self.sessions()], ["blip-a"])
+
+    def test_no_free_account_left_keeps_the_session(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600},
+                    "b": {"status": "rejected", "resets_ts": time.time() + 3600}})
+        r = self.run_pool("hi", FAKE_WAIT="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c["token"] for c in self.sessions()], ["limit-a"])
+        self.assertIn("exhausted", [e["event"] for e in self.events()])
+
+    @unittest.skipIf(os.name == "nt", "no SIGTERM to send on Windows")
+    def test_terminate_ends_the_session_without_a_switch(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600},
+                    "b": {"status": "rejected", "resets_ts": time.time() + 3600}})
+        p = subprocess.Popen([sys.executable, POOL, "hi"], env=self.env, cwd=self.tmp, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        deadline = time.time() + 10
+        while not self.sessions() and time.time() < deadline:
+            time.sleep(0.1)
+        time.sleep(1)
+        p.terminate()
+        p.communicate(timeout=20)
+        self.assertNotEqual(p.returncode, 0)  # claude's own exit from the SIGTERM it was passed
+        self.assertEqual(len(self.sessions()), 1)
+        self.assertFalse((self.read_usage().get("a") or {}).get("running"))
+
+    def test_resume_runs_in_the_sessions_folder(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": time.time() + 3600}})
+        wt = os.path.join(self.tmp, "wt")
+        os.makedirs(wt)
+        self.run_pool("-w", "feat", "hi", FAKE_SESSION_CWD=wt)
+        first, second = self.sessions()
+        self.assertEqual(second["args"][2:4], ["--resume", "sess-1"])  # -w feat is not run again
+        self.assertNotIn("-w", second["args"])
+        self.assertEqual(os.path.realpath(second["cwd"]), os.path.realpath(wt))
+
+    def test_own_settings_are_kept_and_get_the_hook(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        user = os.path.join(self.tmp, "mine.json")
+        with open(user, "w") as f:
+            json.dump({"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}, f)
+        self.run_pool("--settings", user, "hi")
+        s = self.sessions()[0]["settings"]
+        self.assertEqual(s["model"], "opus")
+        self.assertIn("Stop", s["hooks"])
+        self.assertIn("--pool-hook", s["hooks"]["StopFailure"][0]["hooks"][0]["command"])
+        self.assertEqual(self.sessions()[0]["args"].count("--settings"), 1)
+        self.run_pool("--settings", '{"model": "sonnet"}', "hi")
+        self.assertEqual(self.sessions()[1]["settings"]["model"], "sonnet")
+
+    def test_commands_one_account_and_switch_off_hand_over_to_claude(self):
+        self.add("a", "limit-a")
+        self.add("b", "tok-b")
+        for args, env in ((["mcp", "list"], {}), (["--version"], {}), (["hi"], {"CLAUDE_POOL_SWITCH": "off"}),
+                          (["hi"], {"CLAUDE_POOL_ACCOUNT": "a"})):
+            self.run_pool(*args, **env)
+            self.assertIsNone(self.calls()[-1]["settings"], (args, env))
+            self.assertEqual(self.calls()[-1]["args"], args)
+
+    def test_hook_saves_its_input(self):
+        out = os.path.join(self.tmp, "f.json")
+        r = self.run_pool("--pool-hook", out, stdin='{"error": "rate_limit"}')
+        self.assertEqual(r.returncode, 0)
+        with open(out) as f:
+            self.assertEqual(json.load(f), {"error": "rate_limit"})
+
+    def test_help_parsing_and_args(self):
+        import importlib.util
+        spec_ = importlib.util.spec_from_file_location("claude_pool", POOL)
+        cp = importlib.util.module_from_spec(spec_)
+        spec_.loader.exec_module(cp)
+        text = ("Usage: claude\n\nOptions:\n  --add-dir <directories...>            Dirs\n"
+                "  --allowedTools, --allowed-tools <tools...>\n      Tools\n  -r, --resume [value]  Resume\n"
+                "  --model <model>                       Model\n  -c, --continue  Go on\n  --verbose  Loud\n\n"
+                "Commands:\n  mcp                                   MCP\n  plugin|plugins  Plugins\n"
+                "  attach <id|name>  Attach\n")
+        spec = cp.parse_help(text)
+        self.assertEqual(spec["flags"], {"--add-dir": "many", "--allowedTools": "many", "--allowed-tools": "many",
+                                         "-r": "optional", "--resume": "optional", "--model": "one"})
+        self.assertEqual(spec["commands"], ["mcp", "plugin", "plugins", "attach"])
+        self.assertEqual(cp.resume_args(["--resume", "old", "--model=x", "hi", "--", "-x"], spec, "S", "go"),
+                         ["--model=x", "--resume", "S", "go"])
+        self.assertEqual(cp.resume_args(["-r", "--verbose", "hi"], spec, "S", ""), ["--verbose", "--resume", "S"])
+        self.assertTrue(cp.session_mode(["--model", "mcp", "hi"], spec))  # "mcp" is the model here
+        self.assertFalse(cp.session_mode(["plugins", "list"], spec))
+        self.assertEqual(cp.parse_help(""), {"flags": {}, "commands": []})
 
     @unittest.skipIf(os.name == "nt", "a .py file is not a command on Windows")
     def test_refuses_to_call_itself(self):
