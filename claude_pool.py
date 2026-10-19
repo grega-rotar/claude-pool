@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.11.2"
+__version__ = "0.11.3"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -671,9 +671,19 @@ def stream_args(args):
     return out, fmt or "text", verbose
 
 
+def find_claude(b):
+    """`b` on PATH, else where the claude installers put it: an ssh command or a cron job often runs without
+    ~/.local/bin on PATH."""
+    if b != "claude":
+        return shutil.which(b)
+    home = os.path.expanduser("~")
+    return shutil.which(b) or shutil.which(b, path=os.pathsep.join(
+        [os.path.join(home, ".local", "bin"), os.path.join(home, ".claude", "local")]))
+
+
 def real_binary():
     b = os.environ.get("CLAUDE_POOL_BINARY") or "claude"
-    path = shutil.which(b)
+    path = find_claude(b)
     if not path:
         sys.exit(f"claude-pool: {b} not found; set CLAUDE_POOL_BINARY to the real claude")
     if os.path.realpath(path) == os.path.realpath(__file__):
@@ -1471,7 +1481,7 @@ def check():
         if level == "FAIL":
             failed.append(text)
     b = os.environ.get("CLAUDE_POOL_BINARY") or "claude"
-    binary = shutil.which(b)
+    binary = find_claude(b)
     if not binary:
         say("FAIL", f"claude not found ({b}); install Claude Code or set CLAUDE_POOL_BINARY")
     else:

@@ -1,6 +1,7 @@
 """Tests for claude-pool against a fake claude. Run: python3 -m unittest discover tests"""
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -592,6 +593,18 @@ class PoolTest(unittest.TestCase):
         r = self.run_pool("-p", "hi", CLAUDE_POOL_BINARY=POOL)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("claude-pool itself", r.stderr)
+
+    @unittest.skipIf(os.name == "nt", "a shebang script is not a command on Windows")
+    def test_finds_claude_in_local_bin_off_path(self):
+        local_bin = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(local_bin)
+        shutil.copy(self.fake, os.path.join(local_bin, "claude"))
+        env = dict(self.env)
+        del env["CLAUDE_POOL_BINARY"]
+        r = subprocess.run([sys.executable, POOL, "-p", "hi"], capture_output=True, text=True, timeout=30, cwd=self.tmp,
+                           env={**env, "PATH": os.path.dirname(sys.executable)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "echo:hi\n")
 
     def probes(self):
         return [c for c in self.calls() if "--system-prompt" in c["args"] and "Reply ok." in c["args"]]
