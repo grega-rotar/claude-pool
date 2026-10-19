@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.2
+
+- **Status line really on the right:** claude runs the status line without a terminal, so the width now comes from claude's own terminal (on Linux), and the padding can't be trimmed away.
+- **Faster start:** an interactive session starts on the saved usage numbers and checks the stale ones in the background, instead of waiting ~10 s for the check first. With no saved numbers yet it still checks first. Print mode (`-p`) still checks before it picks.
+
 ## 0.11.1
 
 - **Status line on the right, in colour:** the pool line sits on the right side of the terminal. Usage (5-hour, week and the next account's) is green while low, yellow from 70% and red from `CLAUDE_POOL_SWITCH_AT` (90%). When the terminal width can't be found, the line stays on the left.

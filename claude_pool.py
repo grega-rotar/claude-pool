@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.11.1"
+__version__ = "0.11.2"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -576,6 +576,22 @@ def refresh(pool, names=None, stale_only=False):
     return results
 
 
+def refresh_soon(pool):
+    """Before an interactive session: when every account has saved numbers, pick on those and check the stale ones
+    in the background, so claude starts at once instead of after a usage check (~10 s). Otherwise check first."""
+    usage = load_usage()
+    if any(kind in ("token", "login", "dir") and not (usage.get(n) or {}).get("checked_ts")
+           for n, (kind, _) in pool.items()):
+        refresh(pool, stale_only=True)
+        return
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--pool-refresh-stale", *pool],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=not WINDOWS)
+    except OSError:
+        refresh(pool, stale_only=True)
+
+
 def record(name, info, ran=True, error=None):
     """Store one run's rate_limit_info for the account."""
     with usage_update() as usage:
@@ -1073,22 +1089,33 @@ def banner(session, data, color=True):
     pad = " " * max(0, terminal_width() - 4 - len(plain))  # claude indents the line and keeps a margin on the right
     if not color:
         return pad + plain
-    return pad + "".join(f"\033[2m{t}\033[0m" if c is None else f"\033[{c}m{t}\033[0m" for t, c in joined)
+    return "\033[0m" + pad + "".join(f"\033[2m{t}\033[0m" if c is None else f"\033[{c}m{t}\033[0m" for t, c in joined)
 
 
 def terminal_width():
-    """The width of the terminal claude draws in: COLUMNS when set (0 = unknown), else the session's terminal.
-    The status line's own output is a pipe, so it asks /dev/tty."""
+    """The width of the terminal claude draws in: COLUMNS when set (0 = unknown), else the terminal of the first
+    parent process (claude) that has one. claude runs the status line without a terminal, so /dev/tty is the last try."""
     if os.environ.get("COLUMNS") is not None:
         try:
             return int(os.environ["COLUMNS"])
         except ValueError:
             return 0
-    try:
-        with open("CONOUT$" if WINDOWS else "/dev/tty") as tty:
-            return os.get_terminal_size(tty.fileno()).columns
-    except (OSError, ValueError):
-        return 0
+    pid, paths = os.getppid(), []
+    for _ in range(6):  # Linux: walk up through /proc to claude
+        try:
+            paths += [os.path.realpath(f"/proc/{pid}/fd/{fd}") for fd in (0, 1, 2)]
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    ttys = [p for p in paths if p.startswith(("/dev/pts/", "/dev/tty"))]
+    for path in ttys + ["CONOUT$" if WINDOWS else "/dev/tty"]:
+        try:
+            with open(path) as tty:
+                return os.get_terminal_size(tty.fileno()).columns
+        except (OSError, ValueError):
+            continue
+    return 0
 
 
 def statusline(folder):
@@ -1525,6 +1552,9 @@ def main(argv=None):
     if cmd == "--pool-refresh":
         refresh(shown(accounts(orca=orca_wanted(True))), names=rest or None)
         return status()
+    if cmd == "--pool-refresh-stale":  # refresh_soon's background check
+        refresh({n: v for n, v in accounts(orca=True).items() if n in rest}, stale_only=True)
+        return 0
     if cmd == "--pool-watch":
         try:
             return watch(float(rest[0]) if rest else 5)
@@ -1549,7 +1579,7 @@ def main(argv=None):
     pool = accounts(orca=orca_wanted(session))
     forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
     if not forced and fresh_secs() > 0:
-        refresh(pool, stale_only=True)
+        refresh_soon(pool)
     name = forced or choose(pool, load_usage(), prefer=own_account(pool))
     env = account_env(*pool[name]) if name in pool else child_env()
     if (name in pool and not forced and len(pool) > 1 and os.environ.get("CLAUDE_POOL_SWITCH", "on") != "off"

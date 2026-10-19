@@ -609,6 +609,25 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(rows["a"]["five_hour"], 95.0)
         self.assertEqual(self.calls()[-1]["token"], "tok-b")  # a is past the 90% margin now
 
+    def test_interactive_starts_on_saved_numbers_and_checks_after(self):
+        now = time.time()
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.usage({"a": {"seven_day": 30, "checked_ts": now - 3600}, "b": {"seven_day": 40, "checked_ts": now - 3600}})
+        self.run_pool("--version", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(self.calls()[0]["args"], ["--version"])  # claude first, no wait for a check
+        for _ in range(100):
+            if len(self.probes()) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(sorted(c["token"] for c in self.probes()), ["tok-a", "tok-b"])
+
+    def test_interactive_with_no_numbers_checks_first(self):
+        self.add("a", "tok-a")
+        self.run_pool("--version", CLAUDE_POOL_FRESH="300")
+        self.assertEqual(self.calls()[0]["token"], "tok-a")
+        self.assertIn("Reply ok.", self.calls()[0]["args"])
+
     def test_fresh_numbers_are_not_probed(self):
         self.add("a", "tok-a")
         self.usage({"a": {"seven_day": 30, "checked_ts": time.time() - 10}})
