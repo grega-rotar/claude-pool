@@ -103,7 +103,7 @@ class PoolTest(unittest.TestCase):
         r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
         self.assertEqual([c["token"] for c in self.probes()], ["login"])
         line = [l for l in r.stdout.splitlines() if l.startswith("login ")][0]
-        self.assertIn("50.0", line)
+        self.assertIn("50%", line)
         self.assertIn("0m ago", line)
 
     def test_text_output_and_stream_flags(self):
@@ -312,7 +312,7 @@ class PoolTest(unittest.TestCase):
         with open(self.state) as f:
             rows = json.load(f)
         self.assertEqual((rows["a"]["five_hour"], rows["b"]["five_hour"]), (50.0, 50.0))  # both parallel checks saved
-        self.assertIn("50.0", r.stdout)
+        self.assertIn("50%", r.stdout)
         self.assertIn("0m ago", r.stdout)
 
     def test_pool_watch_refreshes_and_keeps_going(self):
@@ -326,7 +326,7 @@ class PoolTest(unittest.TestCase):
             p.kill()
             p.wait()
             p.stdout.close()
-        self.assertIn("50.0", out)
+        self.assertIn("50%", out)
         self.assertIn("next check in 1 min", out)
         self.assertEqual(len(self.probes()), 1)
 
@@ -372,7 +372,7 @@ class PoolTest(unittest.TestCase):
         self.usage({"a": {"seven_day": 30, "runs": 4, "seven_day_resets_ts": time.time() + 86400}})
         r = self.run_pool("--pool-status")
         self.assertIn("b", r.stdout)
-        self.assertIn("<- next", [l for l in r.stdout.splitlines() if l.startswith("a ")][0])
+        self.assertIn("next", [l for l in r.stdout.splitlines() if l.startswith("a ")][0])
 
     # --- reruns -----------------------------------------------------------------------------------------------
 

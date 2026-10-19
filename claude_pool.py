@@ -41,7 +41,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -56,7 +56,7 @@ Use it like claude:   claude-pool -p "hi" --output-format json
 
 Commands:
   --pool-help              this help
-  --pool-status            accounts with their usage; "<- next" is used next
+  --pool-status            accounts with their usage; "next" is used next
   --pool-refresh [name..]  check usage of every account (or the named ones) now
   --pool-watch [minutes]   --pool-refresh every few minutes (default 5) until Ctrl+C
   --pool-check             check the setup: claude, folders, permissions, every token
@@ -740,22 +740,42 @@ def parse_events(events):
 
 
 def status():
+    """The accounts as a table: usage, when it resets (local time), and what happens to each account next."""
     pool, usage = shown(accounts(warn=True)), load_usage()
     now = time.time()
-    fmt_ts = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "-"  # noqa: E731
     best = choose(pool, usage)
-    age = lambda ts: "-" if not ts else f"{int((now - ts) // 60)}m ago"  # noqa: E731
-    num = lambda v: "-" if v is None else v  # noqa: E731
-    print(f"{'account':<16} {'kind':<6} {'5h %':>6} {'7d %':>6}  {'5h reset':<21} {'7d reset':<21} "
-          f"{'checked':<9} {'busy':>4} {'runs':>5}")
+    pct = lambda v: "-" if v is None else f"{v:g}%"  # noqa: E731
+
+    def when(ts):
+        if not ts or ts <= now:
+            return "-"
+        t, left = datetime.fromtimestamp(ts), int(ts - now) // 60
+        day = "" if t.date() == datetime.fromtimestamp(now).date() else t.strftime("%a ")
+        return f"{day}{t:%H:%M} (in {left // 60}h{left % 60:02d}m)" if left >= 60 else f"{day}{t:%H:%M} (in {left}m)"
+
+    def state(r):
+        if broken(r):
+            err = (r.get("error") or "token refused").split(" · ")[0]
+            return "broken: " + (err if len(err) <= 80 else err[:79] + "…")
+        reset = at_limit(r)
+        busy = len(running(r, now))
+        s = f"full until {when(reset).split(' (')[0]}" if reset else ""
+        return ", ".join(x for x in (s, f"{busy} running" if busy else "") if x)
+
+    mixed = any(kind == "key" for kind, _ in pool.values())  # a kind column only when API keys are in the pool
+    head = ["account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "checked", "runs", "status"]
+    rows = []
     for n, (kind, _) in pool.items():
         r = usage.get(n) or {}
-        mark = " <- next" if n == best else (" (at limit)" if at_limit(r) else "")
-        if broken(r):
-            mark = f" (broken: {r.get('error')})"
-        print(f"{n:<16} {kind:<6} {num(r.get('five_hour')):>6} {num(r.get('seven_day')):>6}  "
-              f"{fmt_ts(r.get('resets_ts')):<21} {fmt_ts(r.get('seven_day_resets_ts')):<21} "
-              f"{age(r.get('checked_ts')):<9} {len(running(r, now)):>4} {r.get('runs', 0):>5}{mark}")
+        st = state(r)
+        rows.append([n] + ([kind] if mixed else []) +
+                    [pct(r.get("five_hour")), pct(r.get("seven_day")), when(r.get("resets_ts")),
+                     when(r.get("seven_day_resets_ts")),
+                     "-" if not r.get("checked_ts") else f"{int((now - r['checked_ts']) // 60)}m ago",
+                     str(r.get("runs", 0)), ("next" + (", " + st if st else "")) if n == best else st])
+    widths = [max(len(x[i]) for x in [head] + rows) for i in range(len(head) - 1)]
+    for x in [head] + rows:
+        print("  ".join(c.ljust(w) for c, w in zip(x, widths)) + "  " + x[-1])
     return 0
 
 

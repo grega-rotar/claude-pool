@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2
+
+- **Readable status table:** `--pool-status` and `--pool-watch` show usage as `67%`, resets in local time with how long is left (`20:20 (in 2h55m)`), and a status column (`next`, `full until 20:20`, `2 running`, `broken: <reason>`). Column widths fit the content, and a broken token's reason is cut to one line; the full error stays in `--pool-check` and `--pool-log`.
+
 ## 0.8.1
 
 - **Refused tokens:** a token claude refuses with a 401/403 (for example "Your organization has disabled Claude subscription access") counts as broken, at a check and in a run. It's skipped until rechecked, and a run refused that way is rerun on the next account. Before, a check took it for a CLI change and kept picking it.
