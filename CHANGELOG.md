@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- **Refused tokens:** a token claude refuses with a 401/403 (for example "Your organization has disabled Claude subscription access") counts as broken, at a check and in a run. It's skipped until rechecked, and a run refused that way is rerun on the next account. Before, a check took it for a CLI change and kept picking it.
+
 ## 0.8.0
 
 - **Account in stream-json:** each run starts with a `pool_account` system line naming the account, so a caller reading the stream knows which account it ran on.
