@@ -11,7 +11,7 @@ All optional. Set them as environment variables or as lines in a `.env`.
 | `CLAUDE_POOL_BINARY` | `claude` | The real claude |
 | `CLAUDE_POOL_ACCOUNT` | | Always use this account |
 | `CLAUDE_POOL_STRATEGY` | `drain` | `balance` = least used first |
-| `CLAUDE_POOL_SWITCH_AT` | `90` | 5-hour % to move on |
+| `CLAUDE_POOL_SWITCH_AT` | `90` | 5-hour or 7-day % to move on |
 | `CLAUDE_POOL_SPREAD_AT` | `75` | 5-hour % after which a busy account gets no second run |
 | `CLAUDE_POOL_FRESH` | `300` | Seconds between usage checks, `0` = off |
 | `CLAUDE_POOL_LIMIT` | `100` | % that counts as full |

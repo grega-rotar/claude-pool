@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -79,7 +79,7 @@ Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optio
   CLAUDE_POOL_BINARY       the real claude       claude
   CLAUDE_POOL_ACCOUNT      always use this account, no switching, no checks
   CLAUDE_POOL_STRATEGY     drain (soonest weekly reset first) or balance (least used first)
-  CLAUDE_POOL_SWITCH_AT    5-hour % after which the next account is preferred (90)
+  CLAUDE_POOL_SWITCH_AT    5-hour or 7-day % after which the next account is preferred (90)
   CLAUDE_POOL_SPREAD_AT    5-hour % after which a busy account gets no second run (75)
   CLAUDE_POOL_FRESH        seconds between usage checks, 0 = off (300)
   CLAUDE_POOL_LIMIT        % at which an account counts as full (100)
@@ -449,12 +449,17 @@ def five_hour(row, now):
     return (row.get("five_hour") or 0) if (row.get("resets_ts") or 0) > now else 0
 
 
+def seven_day(row, now):
+    """The 7-day usage, or 0 once that window has reset."""
+    return (row.get("seven_day") or 0) if (row.get("seven_day_resets_ts") or 0) > now else 0
+
+
 def choose(pool, usage, skip=(), now=None, prefer=None):
     """The free account to run on next, else None.
 
     drain (default): the account whose 7-day window resets soonest, since its unused room is lost first; then the
     most used. Accounts with no live window (never used, or reset since) come last, so they don't start a window
-    before it's needed. Ties (often no 7-day numbers at all) go the same way by the 5-hour window. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour window is used only when every
+    before it's needed. Ties (often no 7-day numbers at all) go the same way by the 5-hour window. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour or 7-day window is used only when every
     free account is, so a run is less likely to be cut off midway; and one past CLAUDE_POOL_SPREAD_AT that is
     already running something gets no second run while another account has room.
     balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0."""
@@ -463,7 +468,8 @@ def choose(pool, usage, skip=(), now=None, prefer=None):
     free = [n for n in pool if n not in skip and not at_limit(row(n), now) and not broken(row(n), now)]
     if os.environ.get("CLAUDE_POOL_STRATEGY") == "balance":
         return min(free, key=lambda n: (row(n).get("seven_day") or 0, five_hour(row(n), now)), default=None)
-    roomy = [n for n in free if five_hour(row(n), now) < env_num("CLAUDE_POOL_SWITCH_AT", 90)]
+    switch_at = env_num("CLAUDE_POOL_SWITCH_AT", 90)
+    roomy = [n for n in free if five_hour(row(n), now) < switch_at and seven_day(row(n), now) < switch_at]
     calm = [n for n in roomy if not (running(row(n), now) and five_hour(row(n), now) >= env_num("CLAUDE_POOL_SPREAD_AT", 75))]
 
     def drain(reset, used):
