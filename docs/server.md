@@ -1,5 +1,11 @@
 # Servers
 
+## One server, one user
+
+Same as on your laptop: install it and add accounts as that user. A systemd service or cron job that calls `claude-pool` instead of `claude` needs nothing else. New token files count on the next run, so no restart.
+
+If claude-pool isn't on the service's `PATH`, call it by its full path: `~/.local/bin/claude-pool`.
+
 ## One pool for several users
 
 So `www-data`, `deploy` and you share the same accounts and usage:
