@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1
+
+- **Status line on the right, in colour:** the pool line sits on the right side of the terminal. Usage (5-hour, week and the next account's) is green while low, yellow from 70% and red from `CLAUDE_POOL_SWITCH_AT` (90%). When the terminal width can't be found, the line stays on the left.
+
 ## 0.11.0
 
 - **Status line:** every interactive session shows `pool: <account> · <5-hour %> · resets <time> · next: <account>` under the prompt. The % turns yellow from 90%, and a red `⚠ no next account until <time>` appears when no other account is free. It uses the live numbers Claude Code gives its status line and saves them for the pool. Any status line you had, Orca's included, runs first and stays. `CLAUDE_POOL_BANNER=off` turns it off.
