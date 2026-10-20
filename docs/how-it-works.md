@@ -22,8 +22,8 @@
 **The pick**, among the accounts that are free and under 90%:
 
 1. **Room that would be lost anyway:** an account whose weekly room is more than even non-stop use could spend before its reset. Soonest reset first. That's `p ≥ 1`, where `p = (weekly % left / r) / (hours to the reset / 5)`: full 5-hour windows the week still holds, per 5-hour window left.
-2. **No weekly limit:** an account whose usage report lists no weekly window (Team accounts). Using it costs no week. Its 5-hour limit still counts.
-3. **The rest, most room for the time left first:** by `p`. An account whose `r` isn't learned yet counts with the pool's middle `r`. With none learned anywhere, the share of the week's room left over the share of its time left decides (1× = on an even pace). An account with no weekly numbers yet (never checked, or the check failed) counts a little below the pool's middle: still used, never taken for unlimited. Numbers older than an hour (or 4 usage checks) count half as far from even, and never as room to spare.
+2. **No weekly limit:** an account with no weekly numbers (Team accounts list only the 5-hour window). Using it costs no week. Its 5-hour limit still counts.
+3. **The rest, most room for the time left first:** by `p`. An account whose `r` isn't learned yet counts with the pool's middle `r`. With none learned anywhere, the share of the week's room left over the share of its time left decides (1× = on an even pace). Numbers older than an hour (or 4 usage checks) count half as far from even, and never as room to spare.
 
 Values within 25% of each other tie, so the pick doesn't flip on a 1% change. Ties go by the 5-hour window as in `drain`, then by the server's affinity (see [Servers](server.md#several-servers)), then by name.
 
@@ -40,7 +40,7 @@ Values within 25% of each other tie, so the pick doesn't flip on a 1% change. Ti
 
 (Share of the asked work done in two weeks. The model there is simple: usage is seen at once, every job is alike.)
 
-**No weekly limit vs unknown:** an account counts as having no weekly limit only when its usage report lists its windows without a weekly one, and no weekly number is live for it this week. Missing numbers alone never mean unlimited.
+**No weekly numbers = no weekly limit:** an account with no weekly numbers (Team accounts, whose usage report lists only the 5-hour window, and API keys) counts as unlimited for the week. Only its 5-hour limit counts.
 
 ## Interactive sessions
 

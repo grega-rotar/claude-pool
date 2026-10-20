@@ -554,18 +554,16 @@ def stale_secs():
 def pace(row, now, kind="token", opts=None):
     """How the account's weekly limit stands, as (state, s, p, r, sure, left):
 
-    state: none (the usage report lists no weekly window, or an API key), unknown (no weekly numbers yet), stale
-    (numbers older than stale_secs()) or known.
+    state: none (no weekly numbers: no weekly limit, as on Team accounts and API keys), stale (numbers older than
+    stale_secs()) or known.
     s: share of the week's room left over share of the week's time left. 1 = on an even pace, 2 = twice the room
-    it needs; for unknown 0.875 (careful), for none 1. Stale numbers count half as far from 1.
+    it needs; for none 1. Stale numbers count half as far from 1.
     p: full 5-hour windows the weekly room still holds, per 5-hour window left before the reset. From 1 up, even
     non-stop use can't spend the week before it resets. None without r, or with stale numbers.
     r, sure: ratio(); left: weekly % left. With several weekly windows, the tightest one counts."""
-    if kind == "key" or row.get("weekly") == "none":
-        return "none", 1.0, None, None, None, None
     ws = weeks(row)
-    if not ws:
-        return "unknown", 0.875, None, None, None, None
+    if kind == "key" or row.get("weekly") == "none" or not ws:
+        return "none", 1.0, None, None, None, None
     opts = opts or pace_opts()
     stale = now - (row.get("checked_ts") or 0) > opts[0]
     best = None
@@ -583,14 +581,11 @@ def pace(row, now, kind="token", opts=None):
 
 def pace_values(info):
     """({name: value}, the middle value) for {name: pace()}: p, or p at the pool's middle r when the account's own
-    isn't learned yet (with none learned anywhere that is s); a little below the middle with no weekly numbers.
-    Accounts with no weekly limit get none."""
+    isn't learned yet (with none learned anywhere that is s). Accounts with no weekly limit get none."""
     rs = sorted(i[3] for i in info.values() if i[3])
     mid_r = rs[len(rs) // 2] if rs else 100 / WINDOWS_PER_WEEK  # 100/33.6 makes p equal s
-    out = {n: i[1] * 100 / ((i[3] or mid_r) * WINDOWS_PER_WEEK) for n, i in info.items() if i[0] in ("known", "stale")}
-    mid = sorted(out.values())[len(out) // 2] if out else 1
-    out.update({n: 0.875 * mid for n, i in info.items() if i[0] == "unknown"})
-    return out, mid
+    out = {n: i[1] * 100 / ((i[3] or mid_r) * WINDOWS_PER_WEEK) for n, i in info.items() if i[0] != "none"}
+    return out, sorted(out.values())[len(out) // 2] if out else 1
 
 
 def affinity(name, server):
@@ -621,10 +616,10 @@ def choose(pool, usage, skip=(), now=None, prefer=None):
     """The free account to run on next, else None.
 
     pace (default): first an account whose week resets with more room than even non-stop use could spend (p >= 1),
-    soonest reset first, since that room is lost anyway; then accounts with no weekly limit. Then the most weekly
-    room for the time left, in full 5-hour windows (p), so no account runs out of its week early while another still
-    has plenty: an account whose r isn't known yet counts with the pool's middle r (no r at all: s), one with no
-    weekly numbers a little below the pool's middle. Values within PACE_STEP of each other tie, so picks don't flip
+    soonest reset first, since that room is lost anyway; then accounts with no weekly limit (no weekly numbers).
+    Then the most weekly room for the time left, in full 5-hour windows (p), so no account runs out of its week early
+    while another still has plenty: an account whose r isn't known yet counts with the pool's middle r (no r at
+    all: s). Values within PACE_STEP of each other tie, so picks don't flip
     on a 1% change; ties go by the 5-hour window as in drain, then by this server's affinity, so servers sharing
     accounts spread out.
     drain: the account whose 7-day window resets soonest, since its unused room is lost first; then the
@@ -798,9 +793,7 @@ def record(name, info, ran=True, error=None):
                        checked_ts=time.time())
             if "seven_day" in w:
                 row.pop("weekly", None)
-            elif w and not (row.get("seven_day_resets_ts") or 0) > time.time():
-                # The report lists the account's windows and no weekly one, with no weekly number live this week:
-                # no weekly limit (Team accounts). One report missing it mid-week isn't enough.
+            elif w:  # the report lists the account's windows and no weekly one: no weekly limit (Team accounts)
                 row.update(weekly="none", seven_day=None, seven_day_resets_ts=None)
             extra = {k: [round(100 * (v.get("utilization") or 0), 1), v["resetsAt"]] for k, v in w.items()
                      if k.startswith("seven_day_") and isinstance(v, dict) and isinstance(v.get("resetsAt"), (int, float))}
@@ -1771,8 +1764,8 @@ def status(here=None, color=None):
         st, _, p = weekly[n][:3]
         if p is not None and p >= 1:
             return "week resets with room to spare"
-        if st in ("none", "unknown"):
-            return "no weekly limit" if st == "none" else "week unknown"
+        if st == "none":
+            return "no weekly limit"
         return "saving its week" if values[n] < mid / 1.25 else "week to spare" if values[n] > mid * 1.25 else ""
 
     def state(n, r):
@@ -1787,8 +1780,8 @@ def status(here=None, color=None):
     def week_cells(n):
         """pace (s), r with how sure, and full 5-hour windows the week has left."""
         st, s, _, rr, sure, left = weekly[n]
-        if st in ("none", "unknown"):
-            return ["no limit" if st == "none" else "?", "-", "-"]
+        if st == "none":
+            return ["no limit", "-", "-"]
         return [(f"{s:.1f}x" if s < 10 else ">10x") + (" stale" if st == "stale" else ""), f"{rr:.0f} {sure}" if rr else "-",
                 f"{left / rr:.1f}" if rr else "-"]
 
@@ -1828,7 +1821,7 @@ def status(here=None, color=None):
         if rest.count("none"):
             print(f"{rest.count('none')} with no weekly limit: only their 5-hour windows limit them")
         if len(rest) - rest.count("none"):
-            print(f"{len(rest) - rest.count('none')} not estimated yet (weekly use unknown, or too little use to learn from)")
+            print(f"{len(rest) - rest.count('none')} not estimated yet (too little use to learn from)")
     return 0
 
 

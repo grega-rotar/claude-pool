@@ -4,7 +4,7 @@
 
 - **New default strategy, `pace`:** it spends weekly usage that would be lost at the reset anyway, and otherwise keeps every account's week going until its reset, so a small plan whose week resets first no longer runs dry in the first days. Accounts with no weekly limit (Team) go before ones that would spend scarce weekly room. See [Weekly pace](docs/how-it-works.md#weekly-pace). `CLAUDE_POOL_STRATEGY=drain` brings back the old order.
 - **Learned `r`:** how many weekly % points one full 5-hour window uses, learned per account (and per weekly window) from the usage numbers the pool already saves. No extra checks. `CLAUDE_POOL_WINDOW_WEEK` sets it by hand, `CLAUDE_POOL_PACE_MARGIN` sets the safety margin (25%).
-- **No weekly limit vs unknown:** an account whose usage report lists no weekly window counts as having no weekly limit. Missing numbers alone count as unknown, never as unlimited.
+- **No weekly numbers = no weekly limit:** an account with no weekly numbers (Team accounts list only the 5-hour window) counts as unlimited for the week; only its 5-hour limit counts.
 - **`--pool-status` shows the pace:** each account's weekly pace, `r` and 5-hour windows left, why it goes first or waits, and a capacity line for the pool. `--pool-capacity <r>` shows what 1 to 100 identical accounts would hold (hypothetical).
 - **Several servers spread out:** equally good accounts are broken by `CLAUDE_POOL_SERVER_ID` (the host name by default), so servers sharing accounts tend to start on different ones. Best effort: no shared lock.
 - `balance` now keeps the 90% margin and the busy-account rule too, as `drain` and `pace` do.

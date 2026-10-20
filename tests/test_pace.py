@@ -125,12 +125,11 @@ class PaceTest(unittest.TestCase):
 
     # --- missing information ----------------------------------------------------------------------------------
 
-    def test_missing_or_null_weekly_numbers_are_unknown_not_unlimited(self):
+    def test_no_weekly_numbers_is_no_weekly_limit(self):
         for row in ({}, {"seven_day": None, "seven_day_resets_ts": None}, {"five_hour": 10}):
-            self.assertEqual(cp.pace(row, NOW)[0], "unknown")
-        # Unknown sits below the pool's middle: an account known to be on an even pace goes first.
-        self.assertEqual(self.pick({"u": {}, "k": week(50, 84, r=10)}), "k")
-        self.assertEqual(self.pick({"u": {}}), "u")  # but it is still used
+            self.assertEqual(cp.pace(row, NOW)[0], "none")
+        # Unlimited: before an account that would spend weekly room.
+        self.assertEqual(self.pick({"u": {"five_hour": 10, "resets_ts": NOW + H}, "k": week(50, 84, r=10)}), "u")
 
     def test_no_weekly_limit(self):
         self.assertEqual(cp.pace({"weekly": "none"}, NOW)[0], "none")
@@ -285,11 +284,10 @@ class PaceTest(unittest.TestCase):
         self.assertEqual((row["weekly"], row["seven_day"]), ("none", None))
         self.assertEqual(cp.pace(row, time.time())[0], "none")
 
-    def test_one_report_without_it_mid_week_is_not_enough(self):
+    def test_report_without_a_weekly_window_drops_old_weekly_numbers(self):
         old = {"seven_day": 40, "seven_day_resets_ts": time.time() + 50 * H}
         row = self.recorded({"five_hour": {"utilization": 0.14, "resetsAt": time.time() + H}}, old)
-        self.assertNotIn("weekly", row)
-        self.assertEqual(row["seven_day"], 40)
+        self.assertEqual((row["weekly"], row["seven_day"]), ("none", None))
 
     def test_weekly_window_back_clears_no_limit(self):
         w = {"five_hour": {"utilization": 0.1, "resetsAt": time.time() + H},
@@ -305,13 +303,14 @@ class PaceTest(unittest.TestCase):
     def test_status_shows_pace_and_capacity(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp)
-        for n in ("pro", "team", "new"):
+        for n in ("pro", "team", "new", "learning"):
             with open(os.path.join(tmp, n + ".token"), "w") as f:
                 f.write("tok\n")
             os.chmod(os.path.join(tmp, n + ".token"), 0o600)
         now = time.time()
         rows = {"pro": {"seven_day": 40, "seven_day_resets_ts": now + 80 * H, "checked_ts": now, "pace": {"seven_day": {"r": 20, "n": 120}}},
-                "team": {"weekly": "none", "five_hour": 10, "resets_ts": now + H, "checked_ts": now}}
+                "team": {"weekly": "none", "five_hour": 10, "resets_ts": now + H, "checked_ts": now},
+                "learning": {"seven_day": 10, "seven_day_resets_ts": now + 80 * H, "checked_ts": now}}
         with open(os.path.join(tmp, "usage.json"), "w") as f:
             json.dump(rows, f)
         os.environ.update(CLAUDE_POOL_DIR=tmp, CLAUDE_POOL_STATE=os.path.join(tmp, "usage.json"), CLAUDE_POOL_ORCA="off")
@@ -324,7 +323,7 @@ class PaceTest(unittest.TestCase):
         r = cp.ratio(rows["pro"])[0]  # learned 20, plus the margin
         self.assertIn(f"{r:.0f} high", [l for l in text.splitlines() if " pro " in l][0])
         self.assertIn(f"1 account with an estimate: {100 / r:.1f} full 5-hour windows a week, {60 / r:.1f} left", text)
-        self.assertIn("1 with no weekly limit", text)
+        self.assertIn("2 with no weekly limit", text)  # team, and new with no numbers at all
         self.assertIn("1 not estimated yet", text)
 
     def test_capacity_is_marked_hypothetical(self):
