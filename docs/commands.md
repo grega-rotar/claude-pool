@@ -6,7 +6,7 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 
 | Command | What it does |
 |---|---|
-| `claude-pool --pool-status` | Every account with its usage, when it resets, and which one runs next |
+| `claude-pool --pool-status` | Every account with its usage and when it resets, numbered in the order the pool uses them (1 = next) |
 | `claude-pool --pool-watch [minutes]` | The same table, checked again every 5 minutes (or the minutes given) until Ctrl+C |
 | `claude-pool --pool-refresh [name..]` | Check the usage of every account (or the named ones) now |
 | `claude-pool --pool-log [N]` | The last N events (default 20): runs, sessions, switches, errors |
@@ -26,7 +26,7 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 |---|---|
 | `/pool:switch [name]` | Typed in the session: move it to the named account, or the best free one ([more](how-it-works.md#switching-by-hand)) |
 | `! claude-pool --pool-switch [name]` | The same, from the session's shell |
-| `/pool:status` | The `--pool-status` table in the session, with its own account marked "this session" |
+| `/pool:status` | The `--pool-status` table in the session, in colour, with its own account marked "this session" |
 | `/pool:log [N]` | The last N events (default 20), as `--pool-log` |
 
 ## Other

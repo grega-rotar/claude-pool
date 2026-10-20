@@ -1,6 +1,7 @@
 """Tests for claude-pool against a fake claude. Run: python3 -m unittest discover tests"""
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -158,7 +159,7 @@ class PoolTest(unittest.TestCase):
         self.assertIn("login ", self.run_pool("--pool-status").stdout)
         r = self.run_pool("--pool-refresh", FAKE_UTIL="0.5")
         self.assertEqual([c["token"] for c in self.probes()], ["login"])
-        line = [l for l in r.stdout.splitlines() if l.startswith("login ")][0]
+        line = [l for l in r.stdout.splitlines() if l.split()[1:2] == ["login"]][0]
         self.assertIn("50%", line)
         self.assertIn("0m ago", line)
 
@@ -453,11 +454,12 @@ class PoolTest(unittest.TestCase):
         r, out = self.asked(FAKE_PROMPT="/pool:status", FAKE_WAIT="1")
         stop = json.loads(out)
         self.assertEqual(stop["continue"], False)  # the model never sees it
-        lines = stop["stopReason"].splitlines()
+        self.assertIn("\033[1;32m1\033[0m", stop["stopReason"])  # in colour: #1, the next account, green
+        lines = re.sub(r"\033\[[0-9;]*m", "", stop["stopReason"]).splitlines()
         self.assertEqual(lines[0], "claude-pool")
-        self.assertTrue(lines[1].startswith("account"), lines)
-        self.assertIn("this session", next(x for x in lines if x.startswith("a ")))
-        self.assertIn("full until", next(x for x in lines if x.startswith("c ")))
+        self.assertTrue(lines[1].startswith("#  account"), lines)
+        self.assertIn("this session", next(x for x in lines if x.split()[1:2] == ["a"]))
+        self.assertIn("full until", next(x for x in lines if x.split()[1:2] == ["c"]))
         self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])  # nothing switched
         r, out = self.asked(FAKE_PROMPT="/pool:log 3", FAKE_WAIT="1")
         lines = json.loads(out)["stopReason"].splitlines()
@@ -510,7 +512,7 @@ class PoolTest(unittest.TestCase):
         root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "tok-2"),
                           "p3": ("u1", "alice@x.com", "tok-1"), "p4": ("u4", "carol@x.com", None)})
         out = self.run_pool("--pool-status", CLAUDE_POOL_ORCA=root).stdout
-        names = [l.split()[0] for l in out.splitlines()[1:]]
+        names = [l.split()[1] for l in out.splitlines()[1:]]
         # macOS keeps the login in the Keychain, so there a profile without .credentials.json still counts.
         self.assertEqual(sorted(names), ["orca-alice", "orca-bob"] + (["orca-carol"] if sys.platform == "darwin" else []))
 
@@ -926,7 +928,18 @@ class PoolTest(unittest.TestCase):
         self.usage({"a": {"seven_day": 30, "runs": 4, "seven_day_resets_ts": time.time() + 86400}})
         r = self.run_pool("--pool-status")
         self.assertIn("b", r.stdout)
-        self.assertIn("next", [l for l in r.stdout.splitlines() if l.startswith("a ")][0])
+        self.assertIn("next", [l for l in r.stdout.splitlines() if l.startswith("1  a ")][0])
+        self.assertNotIn("\033[", r.stdout)  # no colour into a pipe
+
+    def test_status_ranks_accounts_in_the_order_they_are_used(self):
+        for n in ("a", "b", "c", "d"):
+            self.add(n, "tok-" + n)
+        soon = time.time() + 3600
+        self.usage({"a": {"seven_day": 20, "seven_day_resets_ts": soon + 7200},
+                    "b": {"seven_day": 50, "seven_day_resets_ts": soon},  # its week resets first: drain it first
+                    "c": {"status": "rejected", "resets_ts": soon}})  # full: last, no number
+        rows = [l.split()[:2] for l in self.run_pool("--pool-status").stdout.splitlines()[1:]]
+        self.assertEqual(rows, [["1", "b"], ["2", "a"], ["3", "d"], ["-", "c"]])
 
     # --- reruns -----------------------------------------------------------------------------------------------
 

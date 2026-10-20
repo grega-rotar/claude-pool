@@ -45,7 +45,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -1402,7 +1402,7 @@ def show_in_session(folder, what, n):
     out = io.StringIO()
     with redirect_stdout(out), redirect_stderr(io.StringIO()):  # warnings (token modes) are for the terminal
         try:
-            status(here) if what == "status" else show_log(int(n or 20))
+            status(here, color=True) if what == "status" else show_log(int(n or 20))
         except SystemExit as e:
             print(e.code if isinstance(e.code, str) else f"claude-pool: /pool:{what} failed")
     return out.getvalue().rstrip()
@@ -1532,13 +1532,27 @@ def interactive(args, pool, name, binary, spec):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def status(here=None):
-    """The accounts as a table: usage, when it resets (local time), and what happens to each account next. `here`
-    is the account of the session that asks (/pool:status), marked "this session"."""
+def status(here=None, color=None):
+    """The accounts as a table in the order the pool uses them: #1 is next, then the one after, and so on; full and
+    broken accounts last, with no number. Usage, when it resets (local time), and what happens to each account
+    next. `here` is the account of the session that asks (/pool:status), marked "this session". In colour on a
+    terminal (or when `color`), unless NO_COLOR is set."""
     pool, usage = shown(accounts(warn=True, orca=orca_wanted(True))), load_usage()
     now = time.time()
-    best = choose(pool, usage)
+    order = []
+    while True:
+        n = choose(pool, usage, skip=order, now=now)
+        if n is None:
+            break
+        order.append(n)
+    best = order[0] if order else None
+    order += [n for n in pool if n not in order]
+    if color is None:
+        color = sys.stdout.isatty()
+    color = color and os.environ.get("NO_COLOR") is None
+    switch_at = env_num("CLAUDE_POOL_SWITCH_AT", 90)
     pct = lambda v: "-" if v is None else f"{v:g}%"  # noqa: E731
+    level = lambda v: "2" if v is None else "31" if v >= switch_at else "33" if v >= 70 else "32"  # noqa: E731
 
     def when(ts):
         if not ts or ts <= now:
@@ -1557,19 +1571,27 @@ def status(here=None):
         return ", ".join(x for x in ("this session" if n == here else "", s, f"{busy} running" if busy else "") if x)
 
     mixed = any(kind == "key" for kind, _ in pool.values())  # a kind column only when API keys are in the pool
-    head = ["account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "checked", "runs", "status"]
-    rows = []
-    for n, (kind, _) in pool.items():
-        r = usage.get(n) or {}
+    head = ["#", "account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "checked", "runs",
+                                                             "status"]
+    rows = [[(c, "1;2") for c in head]]  # (text, colour) per cell
+    for i, n in enumerate(order):
+        kind, r = pool[n][0], usage.get(n) or {}
+        five, week = r.get("five_hour"), r.get("seven_day")
         st = state(n, r)
-        rows.append([n] + ([kind] if mixed else []) +
-                    [pct(r.get("five_hour")), pct(r.get("seven_day")), when(r.get("resets_ts")),
-                     when(r.get("seven_day_resets_ts")),
-                     "-" if not r.get("checked_ts") else f"{int((now - r['checked_ts']) // 60)}m ago",
-                     str(r.get("runs", 0)), ("next" + (", " + st if st else "")) if n == best else st])
-    widths = [max(len(x[i]) for x in [head] + rows) for i in range(len(head) - 1)]
-    for x in [head] + rows:
-        print("  ".join(c.ljust(w) for c, w in zip(x, widths)) + "  " + x[-1])
+        st = ("next" + (", " + st if st else "")) if n == best else st
+        out = at_limit(r, now) or broken(r, now)
+        rows.append([(str(i + 1) if not out else "-", "1;32" if n == best else "2"),
+                     (n, "31" if out else "1;32" if n == best else "")] +
+                    ([(kind, "2")] if mixed else []) +
+                    [(pct(five), level(five)), (pct(week), level(week)),
+                     (when(r.get("resets_ts")), "2"), (when(r.get("seven_day_resets_ts")), "2"),
+                     ("-" if not r.get("checked_ts") else f"{int((now - r['checked_ts']) // 60)}m ago", "2"),
+                     (str(r.get("runs", 0)), "2"),
+                     (st, "31" if out else "36" if n == here else "32" if n == best else "")])
+    widths = [max(len(x[i][0]) for x in rows) for i in range(len(head) - 1)]
+    paint = lambda t, c: f"\033[{c}m{t}\033[0m" if color and c and t.strip() else t  # noqa: E731
+    for x in rows:
+        print("  ".join(paint(t.ljust(w), c) for (t, c), w in zip(x, widths)) + "  " + paint(*x[-1]))
     return 0
 
 

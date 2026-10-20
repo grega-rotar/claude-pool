@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.0
+
+- **Status in pool order, in colour:** `--pool-status` and `/pool:status` list the accounts in the order the pool uses them, numbered: `1` is next, then `2`, and so on. Full and broken accounts come last, with `-` for a number. On a terminal and in the session, #1 is bold green, usage is green, yellow from 70% and red from `CLAUDE_POOL_SWITCH_AT` (as in the status line), full and broken accounts are red, and "this session" is cyan. No colour into a pipe or with `NO_COLOR`.
+
 ## 0.14.0
 
 - **`/pool:status` and `/pool:log` in the session:** type `/pool:status` to see every account's usage, resets and which one is next, with the session's own account marked "this session". `/pool:log [N]` shows the last N events (default 20). Both are caught by the `UserPromptSubmit` hook like `/pool:switch`, so no model call is made.
