@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.1
+
+- **"better now" in the status line:** when the pool would pick another account than the session's own now, the status line says so in red, `better now: factory 27% · /pool:switch`, instead of `next: factory 27%`. A session only moves by itself at its limit, so an older one could sit on an account the pool no longer prefers without showing it.
+
 ## 0.16.0
 
 - **New default strategy, `pace`:** it spends weekly usage that would be lost at the reset anyway, and otherwise keeps every account's week going until its reset, so a small plan whose week resets first no longer runs dry in the first days. Accounts with no weekly limit (Team) go before ones that would spend scarce weekly room. See [Weekly pace](docs/how-it-works.md#weekly-pace). `CLAUDE_POOL_STRATEGY=drain` brings back the old order.

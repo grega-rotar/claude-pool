@@ -605,11 +605,12 @@ class PoolTest(unittest.TestCase):
 
     # --- status line ---------------------------------------------------------------------------------------
 
-    def banner_folder(self, account, pool, statusline=None):
+    def banner_folder(self, account, pool, statusline=None, pid=None):
         folder = os.path.join(self.tmp, "banner")
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "session.json"), "w") as f:
-            json.dump({"account": account, "pool": {n: {"kind": "token", "sessions": s} for n, s in pool.items()}}, f)
+            json.dump({"account": account, "pool": {n: {"kind": "token", "sessions": s} for n, s in pool.items()},
+                       "pid": pid}, f)
         if statusline:
             with open(os.path.join(folder, "statusline.json"), "w") as f:
                 json.dump({"type": "command", "command": statusline}, f)
@@ -627,6 +628,23 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(r.stdout, f"pool: a · 85% · resets {at} · week 40% · next: b 12%\n")
         row = self.read_usage()["a"]  # the live numbers are kept for every caller
         self.assertEqual((row["five_hour"], row["seven_day"], row["resets_ts"]), (85.4, 40, int(now) + 7200))
+
+    def test_statusline_says_in_red_when_another_account_is_better_now(self):
+        now = time.time()
+        own = [{"pid": os.getpid(), "host": __import__("socket").gethostname(), "ts": now}]  # this session's run
+        folder = self.banner_folder("a", {"a": "/s", "b": "/s"}, pid=os.getpid())
+        rows = {"a": {"five_hour": 80, "resets_ts": now + 3 * 3600, "running": own},
+                "b": {"five_hour": 30, "resets_ts": now + 3600}}  # b's window ends first: the pool takes b now
+        self.usage(rows)
+        r = self.run_pool("--pool-statusline", folder, stdin="{}", NO_COLOR="1")
+        self.assertTrue(r.stdout.endswith("better now: b 30% · /pool:switch\n"), r.stdout)
+        r = self.run_pool("--pool-statusline", folder, stdin="{}")
+        self.assertIn("\033[31mbetter now: b\033[0m", r.stdout)
+        # a's own window ends first: a is still the pick, its own run mark doesn't make it look busy.
+        rows["b"]["resets_ts"] = now + 4 * 3600
+        self.usage(rows)
+        r = self.run_pool("--pool-statusline", folder, stdin="{}", NO_COLOR="1")
+        self.assertTrue(r.stdout.endswith("next: b 30%\n"), r.stdout)
 
     def test_statusline_never_takes_usage_back(self):
         # Another session saved 9% for this window; this idle session still holds its 5% from earlier.
@@ -663,7 +681,7 @@ class PoolTest(unittest.TestCase):
     def test_statusline_is_right_aligned_and_green_while_low(self):
         now = time.time()
         folder = self.banner_folder("a", {"a": "/s", "b": "/s"})
-        self.usage({"a": {"five_hour": 4, "resets_ts": now + 3600}, "b": {"five_hour": 75, "resets_ts": now + 3600}})
+        self.usage({"a": {"five_hour": 4, "resets_ts": now + 3600}, "b": {"five_hour": 75, "resets_ts": now + 7200}})
         out = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="80").stdout
         self.assertIn("\033[32m4%", out)
         self.assertIn("\033[33m75%", out)  # b's use, from 70%

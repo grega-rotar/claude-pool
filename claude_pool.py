@@ -47,7 +47,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -1319,17 +1319,24 @@ def banner(session, data, color=True):
     here = (pool.get(name) or {}).get("sessions")
     others = {n: (v.get("kind"), None) for n, v in pool.items() if v.get("sessions") == here}
     nxt = choose(others, usage, skip={name}, now=now)
+    # The pool's pick now, this session's own run mark left out (or it would look busy to itself). When that isn't
+    # this account, say so in red: a session only moves by itself at its limit.
+    mine = {**row, "running": [r for r in row.get("running") or []
+                                if not (r.get("pid") == session.get("pid") and r.get("host") == HOST)]}
+    better = nxt and choose(others, {**usage, name: mine}, now=now) == nxt
     if nxt:
         n5 = five_hour(usage.get(nxt) or {}, now)
-        pieces.append(("2", f"next: {nxt}"))
+        pieces.append(("31", f"better now: {nxt}") if better else ("2", f"next: {nxt}"))
         if n5:
             pieces.append((level(n5), f"{n5:.0f}%"))
+        if better:
+            pieces.append(("31", "/pool:switch"))
     else:
         resets = [r for r in (at_limit(usage.get(n) or {}, now) for n in others if n != name) if r]
         pieces.append(("31", "⚠ no next account" + (f" until {clock(min(resets))}" if resets else "")))
     joined = [(pieces[0][1], pieces[0][0])]
     for c, t in pieces[1:]:  # a next account's % sits right after its name, without a dot
-        joined.append((" " if t[0].isdigit() and joined[-1][0].startswith("next: ") else " · ", None))
+        joined.append((" " if t[0].isdigit() and joined[-1][0].startswith(("next: ", "better now: ")) else " · ", None))
         joined.append((t, c))
     plain = "".join(t for t, _ in joined)
     pad = " " * max(0, terminal_width() - 4 - len(plain))  # claude indents the line and keeps a margin on the right
@@ -1654,7 +1661,7 @@ def interactive(args, pool, name, binary, spec):
             log("session", account=name, resumed=switches > 0)
             if banner:  # what the status line shows: this session's account and the accounts it could move to
                 with open(os.path.join(tmp, "session.json.tmp"), "w", encoding="utf-8") as fh:
-                    json.dump({"account": name, "pool": shares}, fh)
+                    json.dump({"account": name, "pool": shares, "pid": os.getpid()}, fh)
                 replace(os.path.join(tmp, "session.json.tmp"), os.path.join(tmp, "session.json"))
             # CLAUDE_POOL_SESSION: where `claude-pool --pool-switch`, run from inside the session, finds us
             p = subprocess.Popen([binary] + args, env={**account_env(*pool[name]), "CLAUDE_POOL_SESSION": tmp}, cwd=cwd)
