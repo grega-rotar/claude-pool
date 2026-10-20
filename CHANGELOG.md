@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0
+
+- **Switch by hand:** type `/pool:switch [account]` in an interactive session to move it to that account, or with no name to the best free one. It's the same restart as at a usage limit (`--resume`, same flags and folder), without the "Continue" nudge. The prompt is caught by a `UserPromptSubmit` hook and never reaches the model. A full, refused, unknown or unshared account is turned down with the reason. `! claude-pool --pool-switch [account]` does the same from the session's shell. Needs a claude with `--plugin-dir` for the command; the `--pool-switch` route works without it.
+- **Same usage in every session:** an idle session's status line saved its last reply's numbers over newer ones from other sessions or checks, so two panes on one account showed different numbers (5% and 9%), and the pool picked on the lower one. Within one window usage now only goes up when saved, and numbers from an earlier window are ignored. The status line also refreshes every 30 seconds, so idle panes catch up.
+- **Resumed sessions follow the pool:** a session started with `--resume` or `-c` (as when Orca reopens its panes) no longer goes back to its pane's own account first. It's picked in the pool's usual order.
+
 ## 0.12.1
 
 - **7-day margin:** an account past `CLAUDE_POOL_SWITCH_AT` (90%) of its 7-day window is now used only when every free account is past the margin too, as with the 5-hour window. Before, an account at 97% of its week still went first when its week reset soonest, and a long run could hit the limit midway.

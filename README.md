@@ -19,6 +19,7 @@ claude-pool -p "fix the tests"    # print mode, like `claude -p`
   pool: editors2 · 95% · resets 23:10 · ⚠ no next account until 20:20
   ```
 
+- **Or switch when you want.** Type `/pool:switch work` in the session to move it to `work`, or just `/pool:switch` to move it to the best free account. Same conversation, no model call for the command.
 - **Print mode reruns.** A `-p` run cut off by a limit is rerun on the next account, if it hadn't used tools yet.
 - **It picks well.** The account whose week resets soonest goes first, since leftover usage is lost at the reset. It moves on at 90% of the 5-hour limit.
 - **It's safe to install first.** With no accounts set up it just runs `claude` on your normal login.
@@ -94,7 +95,7 @@ If you use [Orca](https://github.com/stablyai/orca), the Claude accounts you're 
 [ -n "$ORCA_PANE_KEY" ] && alias claude=claude-pool
 ```
 
-- **A pane starts on its own account** while that account has room, so Orca's label is right until a switch.
+- **A new pane starts on its own account** while that account has room, so Orca's label is right until a switch. When Orca reopens and resumes its panes, they are picked in the pool's order instead.
 - **At the limit, the session moves to another Orca account** (or a token you added) and carries on. All Orca accounts share `~/.claude/projects`, so the conversation is there. After a switch, Orca's pane still shows the first account's name.
 - **Logins stay Orca's.** claude-pool never reads or copies them: it starts claude in that account's Orca folder, and claude keeps the login fresh there, as it does in an Orca pane.
 - **Only interactive sessions and `--pool-*` commands use them.** Scripts and services on `claude-pool -p` keep to the accounts set up for them. Set `CLAUDE_POOL_ORCA=on` to change that, or `off` to never use Orca's accounts.

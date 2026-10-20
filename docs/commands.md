@@ -20,6 +20,13 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 | `claude-pool --pool-on <name>` | Put it back |
 | `claude-pool --pool-check` | Check the setup: claude, folders, permissions, every token |
 
+## In a session
+
+| Command | What it does |
+|---|---|
+| `/pool:switch [name]` | Typed in the session: move it to the named account, or the best free one ([more](how-it-works.md#switching-by-hand)) |
+| `! claude-pool --pool-switch [name]` | The same, from the session's shell |
+
 ## Other
 
 | Command | What it does |
