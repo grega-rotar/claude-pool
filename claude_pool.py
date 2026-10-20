@@ -22,6 +22,7 @@ seconds are refreshed before a pick with one tiny Haiku call per account, so use
 `claude-pool --pool-help` lists the commands and settings.
 """
 import getpass
+import io
 import json
 import os
 import re
@@ -34,7 +35,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 
 WINDOWS = os.name == "nt"
@@ -44,7 +45,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.13.2"
+__version__ = "0.14.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -70,6 +71,7 @@ Commands:
   --pool-log [N]           the last N events (default 20): runs, switches, errors
   --pool-switch [name]     inside a session (a `!` command or claude's Bash): move it to the named account, or
                            the best free one; typing /pool:switch [name] in the session does the same
+                           (and /pool:status, /pool:log [N] show those two in the session)
   --pool-version           version
 
 Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optional):
@@ -1034,9 +1036,10 @@ def with_hook(args, spec, folder, banner=True):
         os.makedirs(os.path.join(plugin[1], ".claude-plugin"))
         os.makedirs(os.path.join(plugin[1], "commands"))
         write_json(os.path.join(plugin[1], ".claude-plugin", "plugin.json"),
-                   {"name": "pool", "description": "claude-pool: move this session to another account"})
-        with open(os.path.join(plugin[1], "commands", "switch.md"), "w", encoding="utf-8") as fh:
-            fh.write(POOL_COMMAND_MD)
+                   {"name": "pool", "description": "claude-pool: accounts, their usage, and moving this session"})
+        for cmd, md in POOL_COMMANDS_MD.items():
+            with open(os.path.join(plugin[1], "commands", cmd + ".md"), "w", encoding="utf-8") as fh:
+                fh.write(md)
     return ["--settings", settings_path] + plugin + out, settings
 
 
@@ -1325,13 +1328,19 @@ def asked_account(pool, name, want):
 
 # `/pool:switch [account]` in a session (or `claude-pool --pool-switch [account]` from its shell) hands a switch
 # to the session's claude-pool through its temp folder and waits for the answer, which claude shows the user.
+# `/pool:status` and `/pool:log [N]` show --pool-status and --pool-log the same way, without a model call.
 POOL_COMMAND = re.compile(r"/pool:switch(?:\s+(\S+))?\s*$")
-POOL_COMMAND_MD = """---
-description: Move this session to another claude-pool account (the best free one, or the one named)
-argument-hint: [account]
+POOL_SHOW = re.compile(r"/pool:(status|log)(?:\s+(\d+))?\s*$")
+POOL_COMMANDS_MD = {cmd: f"""---
+description: {about}
+argument-hint: {hint}
 ---
-Tell the user in one line: /pool:switch only works in a claude-pool session that runs hooks, so nothing was switched.
-"""
+Tell the user in one line: /pool:{cmd} only works in a claude-pool session that runs hooks; `claude-pool --pool-{cmd}` \
+does the same from a terminal.
+""" for cmd, about, hint in (
+    ("switch", "Move this session to another claude-pool account (the best free one, or the one named)", "[account]"),
+    ("status", "claude-pool accounts with their usage, when it resets, and which one is next", ""),
+    ("log", "The last claude-pool events (default 20): runs, switches, errors", "[N]"))}
 
 
 def write_json(path, data):
@@ -1375,7 +1384,28 @@ def prompt_hook(folder):
         if os.environ.get("NO_COLOR") is None:
             message = ("\033[32m" if ok else "\033[31m") + message + "\033[0m"
         print(json.dumps({"continue": False, "stopReason": message}))
+        return 0
+    m = POOL_SHOW.match((data.get("prompt") or "").strip())
+    if m:  # a stop too: the table shows under the prompt and the model never sees it
+        print(json.dumps({"continue": False, "stopReason": "claude-pool\n" + show_in_session(folder, *m.groups())}))
     return 0
+
+
+def show_in_session(folder, what, n):
+    """--pool-status (this session's account marked) or --pool-log [n] as text, for /pool:status and /pool:log."""
+    load_dotenv()
+    try:
+        with open(os.path.join(folder, "session.json"), encoding="utf-8") as f:
+            here = json.load(f).get("account")
+    except (OSError, ValueError):
+        here = None
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):  # warnings (token modes) are for the terminal
+        try:
+            status(here) if what == "status" else show_log(int(n or 20))
+        except SystemExit as e:
+            print(e.code if isinstance(e.code, str) else f"claude-pool: /pool:{what} failed")
+    return out.getvalue().rstrip()
 
 
 def switch(want):
@@ -1502,8 +1532,9 @@ def interactive(args, pool, name, binary, spec):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def status():
-    """The accounts as a table: usage, when it resets (local time), and what happens to each account next."""
+def status(here=None):
+    """The accounts as a table: usage, when it resets (local time), and what happens to each account next. `here`
+    is the account of the session that asks (/pool:status), marked "this session"."""
     pool, usage = shown(accounts(warn=True, orca=orca_wanted(True))), load_usage()
     now = time.time()
     best = choose(pool, usage)
@@ -1516,21 +1547,21 @@ def status():
         day = "" if t.date() == datetime.fromtimestamp(now).date() else t.strftime("%a ")
         return f"{day}{t:%H:%M} (in {left // 60}h{left % 60:02d}m)" if left >= 60 else f"{day}{t:%H:%M} (in {left}m)"
 
-    def state(r):
+    def state(n, r):
         if broken(r):
             err = (r.get("error") or "token refused").split(" · ")[0]
             return "broken: " + (err if len(err) <= 80 else err[:79] + "…")
         reset = at_limit(r)
         busy = len(running(r, now))
         s = f"full until {when(reset).split(' (')[0]}" if reset else ""
-        return ", ".join(x for x in (s, f"{busy} running" if busy else "") if x)
+        return ", ".join(x for x in ("this session" if n == here else "", s, f"{busy} running" if busy else "") if x)
 
     mixed = any(kind == "key" for kind, _ in pool.values())  # a kind column only when API keys are in the pool
     head = ["account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "checked", "runs", "status"]
     rows = []
     for n, (kind, _) in pool.items():
         r = usage.get(n) or {}
-        st = state(r)
+        st = state(n, r)
         rows.append([n] + ([kind] if mixed else []) +
                     [pct(r.get("five_hour")), pct(r.get("seven_day")), when(r.get("resets_ts")),
                      when(r.get("seven_day_resets_ts")),

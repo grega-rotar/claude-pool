@@ -26,6 +26,8 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 |---|---|
 | `/pool:switch [name]` | Typed in the session: move it to the named account, or the best free one ([more](how-it-works.md#switching-by-hand)) |
 | `! claude-pool --pool-switch [name]` | The same, from the session's shell |
+| `/pool:status` | The `--pool-status` table in the session, with its own account marked "this session" |
+| `/pool:log [N]` | The last N events (default 20), as `--pool-log` |
 
 ## Other
 
