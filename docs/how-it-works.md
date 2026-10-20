@@ -44,7 +44,7 @@ Ctrl+C goes to claude, not claude-pool. Closing the terminal or a `kill` reaches
 
 Type `/pool:switch work` in the session to move it to `work`. Type `/pool:switch` with no name to move it to the account the pool would pick now. When that is the account it already runs on, it stays. Typing `/pool` brings it up in the command list.
 
-- claude-pool loads the command as a small plugin (`--plugin-dir`) and catches it in a `UserPromptSubmit` hook, so the prompt never reaches the model and costs nothing. The answer shows up as the hook's message.
+- claude-pool loads the command as a small plugin (`--plugin-dir`) and catches it in a `UserPromptSubmit` hook. The hook stops the turn there, so no model call is made. The answer is one line, `Operation stopped by hook: claude-pool: ...`: green when the session moves or stays, red when it can't. The "Operation stopped by hook" part is Claude Code's own and can't be changed. `/pool:switch` stays in the conversation as a message, a few tokens.
 - The account must see the same conversation and have room. Its usage is rechecked first, unless it was checked in the last minute. A full, refused or unknown account is turned down with the reason, and the session stays where it is.
 - The session restarts with `--resume <id>` as at a limit, but without the "Continue" nudge: it waits for you.
 - From the session's shell, `! claude-pool --pool-switch [name]` does the same. So does asking Claude to run it. It needs one message sent in the session first, so it knows the session id.

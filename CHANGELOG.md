@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.2
+
+- **`/pool:switch` answers in one coloured line:** `Operation stopped by hook: claude-pool: ...`, green when the session moves or stays, red when it can't (`NO_COLOR` leaves the colour out). Before, it was a three-line yellow "blocked by hook" warning, and `/pool:switch` came back in the prompt box. Naming the account the session already runs on now counts as staying too.
+
 ## 0.13.1
 
 - **`/pool:switch` stays on the best account:** with no name, a session already on the account the pool would pick now stays there ("already the best account"), instead of moving to the next one.

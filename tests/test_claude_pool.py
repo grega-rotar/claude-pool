@@ -407,8 +407,9 @@ class PoolTest(unittest.TestCase):
     def test_pool_command_moves_the_session_without_a_nudge(self):
         r, out = self.asked(FAKE_PROMPT="/pool:switch b")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(out), {"decision": "block",  # the prompt never reaches the model
-                                           "reason": "claude-pool: moving this session to b; it restarts in a moment"})
+        # The turn stops there, so the prompt never reaches the model: one green line.
+        self.assertEqual(json.loads(out), {"continue": False, "stopReason":
+                                           "\033[32mclaude-pool: moving this session to b; it restarts in a moment\033[0m"})
         first, second = self.sessions()
         self.assertEqual((first["token"], second["token"]), ("tok-a", "tok-b"))
         self.assertEqual(second["args"][4:], ["--model", "haiku", "--resume", "sess-1"])
@@ -423,9 +424,12 @@ class PoolTest(unittest.TestCase):
         self.assertIn("--pool-prompt", self.sessions()[0]["settings"]["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
 
     def test_pool_command_without_a_name_stays_on_the_best_account(self):
-        r, out = self.asked(FAKE_PROMPT="/pool:switch", FAKE_WAIT="1")
-        self.assertIn("a is already the best account; staying on it", out)
-        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])
+        for prompt, why in (("/pool:switch", "a is already the best account; staying on it"),
+                            ("/pool:switch a", "this session already runs on a")):
+            shutil.rmtree(self.log, ignore_errors=True)
+            r, out = self.asked(FAKE_PROMPT=prompt, FAKE_WAIT="1")
+            self.assertEqual(json.loads(out)["stopReason"], f"\033[32mclaude-pool: {why}\033[0m")
+            self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])  # and claude's own exit isn't a switch
 
     def test_pool_command_without_a_name_takes_the_best_free_account(self):
         # Since the session started, a went past the 90% margin: b is the pool's pick now.
@@ -435,13 +439,15 @@ class PoolTest(unittest.TestCase):
         self.assertEqual([c["token"] for c in self.sessions()], ["tok-a", "tok-b"])
 
     def test_pool_command_refuses_a_full_or_unknown_account(self):
-        for want, why in (("c", "c is full until"), ("zzz", "no account zzz; the pool has a, b, c"),
-                          ("a", "already runs on a")):
+        for want, why in (("c", "c is full until"), ("zzz", "no account zzz; the pool has a, b, c")):
             shutil.rmtree(self.log, ignore_errors=True)
             r, out = self.asked(FAKE_PROMPT="/pool:switch " + want, FAKE_WAIT="1")
-            self.assertEqual(json.loads(out)["decision"], "block")
-            self.assertIn(why, json.loads(out)["reason"])
+            self.assertEqual(json.loads(out)["continue"], False)
+            self.assertTrue(json.loads(out)["stopReason"].startswith("\033[31m"), out)  # red
+            self.assertIn(why, json.loads(out)["stopReason"])
             self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"], want)
+        r, out = self.asked(FAKE_PROMPT="/pool:switch zzz", FAKE_WAIT="1", NO_COLOR="1")
+        self.assertTrue(json.loads(out)["stopReason"].startswith("claude-pool: no account zzz"))
 
     def test_other_prompts_pass_through(self):
         r, out = self.asked(FAKE_PROMPT="/pool:switches and /pool:switch b", FAKE_WAIT="1")
