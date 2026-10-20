@@ -449,6 +449,21 @@ class PoolTest(unittest.TestCase):
         r, out = self.asked(FAKE_PROMPT="/pool:switch zzz", FAKE_WAIT="1", NO_COLOR="1")
         self.assertTrue(json.loads(out)["stopReason"].startswith("claude-pool: no account zzz"))
 
+    def test_pool_status_and_log_show_in_the_session(self):
+        r, out = self.asked(FAKE_PROMPT="/pool:status", FAKE_WAIT="1")
+        stop = json.loads(out)
+        self.assertEqual(stop["continue"], False)  # the model never sees it
+        lines = stop["stopReason"].splitlines()
+        self.assertEqual(lines[0], "claude-pool")
+        self.assertTrue(lines[1].startswith("account"), lines)
+        self.assertIn("this session", next(x for x in lines if x.startswith("a ")))
+        self.assertIn("full until", next(x for x in lines if x.startswith("c ")))
+        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])  # nothing switched
+        r, out = self.asked(FAKE_PROMPT="/pool:log 3", FAKE_WAIT="1")
+        lines = json.loads(out)["stopReason"].splitlines()
+        self.assertEqual(lines[0], "claude-pool")
+        self.assertTrue(1 < len(lines) <= 4, lines)
+
     def test_other_prompts_pass_through(self):
         r, out = self.asked(FAKE_PROMPT="/pool:switches and /pool:switch b", FAKE_WAIT="1")
         self.assertEqual(out, "")

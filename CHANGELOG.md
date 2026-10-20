@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.0
+
+- **`/pool:status` and `/pool:log` in the session:** type `/pool:status` to see every account's usage, resets and which one is next, with the session's own account marked "this session". `/pool:log [N]` shows the last N events (default 20). Both are caught by the `UserPromptSubmit` hook like `/pool:switch`, so no model call is made.
+
 ## 0.13.2
 
 - **`/pool:switch` answers in one coloured line:** `Operation stopped by hook: claude-pool: ...`, green when the session moves or stays, red when it can't (`NO_COLOR` leaves the colour out). Before, it was a three-line yellow "blocked by hook" warning, and `/pool:switch` came back in the prompt box. Naming the account the session already runs on now counts as staying too.
