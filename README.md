@@ -95,7 +95,7 @@ If you use [Orca](https://github.com/stablyai/orca), the Claude accounts you're 
 [ -n "$ORCA_PANE_KEY" ] && alias claude=claude-pool
 ```
 
-- **A pane starts on its own account** while that account has room, so Orca's label is right until a switch.
+- **A new pane starts on its own account** while that account has room, so Orca's label is right until a switch. When Orca reopens and resumes its panes, they are picked in the pool's order instead.
 - **At the limit, the session moves to another Orca account** (or a token you added) and carries on. All Orca accounts share `~/.claude/projects`, so the conversation is there. After a switch, Orca's pane still shows the first account's name.
 - **Logins stay Orca's.** claude-pool never reads or copies them: it starts claude in that account's Orca folder, and claude keeps the login fresh there, as it does in an Orca pane.
 - **Only interactive sessions and `--pool-*` commands use them.** Scripts and services on `claude-pool -p` keep to the accounts set up for them. Set `CLAUDE_POOL_ORCA=on` to change that, or `off` to never use Orca's accounts.

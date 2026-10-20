@@ -490,6 +490,18 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(second["args"][4:], ["--model", "haiku", "--resume", "sess-1",
                                               "Continue where you left off. Your last turn was cut off by a usage limit."])
 
+    def test_orca_resume_is_picked_in_pool_order_not_the_panes_account(self):
+        # Orca reopens a pane on its own account with --resume: the pool's pick (soonest weekly reset) wins.
+        root = self.orca({"p1": ("u1", "alice@x.com", "tok-1"), "p2": ("u2", "bob@x.com", "tok-2")})
+        soon = time.time() + 3600
+        self.usage({"orca-alice": {"seven_day": 50, "seven_day_resets_ts": soon},
+                    "orca-bob": {"seven_day": 10, "seven_day_resets_ts": soon + 86400}})
+        pane = dict(CLAUDE_POOL_ORCA=root, CLAUDE_CONFIG_DIR=self.home_of(root, "p2"))
+        self.run_pool("--resume", "abc", **pane)
+        self.assertEqual(self.sessions()[-1]["token"], "tok-1")
+        self.run_pool("hi", **pane)  # a new session still starts on the pane's own account
+        self.assertEqual(self.sessions()[-1]["token"], "tok-2")
+
     def test_orca_and_tokens_mix_when_they_share_the_conversations(self):
         root = self.orca({"p1": ("u1", "alice@x.com", "limit-1")})
         self.add("work", "tok-w")
@@ -552,6 +564,29 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(r.stdout, f"pool: a · 85% · resets {at} · week 40% · next: b 12%\n")
         row = self.read_usage()["a"]  # the live numbers are kept for every caller
         self.assertEqual((row["five_hour"], row["seven_day"], row["resets_ts"]), (85.4, 40, int(now) + 7200))
+
+    def test_statusline_never_takes_usage_back(self):
+        # Another session saved 9% for this window; this idle session still holds its 5% from earlier.
+        now = int(time.time())
+        folder = self.banner_folder("a", {"a": "/s", "b": "/s"})
+        self.usage({"a": {"five_hour": 9, "resets_ts": now + 7200, "seven_day": 30, "seven_day_resets_ts": now + 90000}})
+        live = lambda pct, reset: {"rate_limits": {"five_hour": {"used_percentage": pct, "resets_at": reset}}}  # noqa: E731
+        r = self.run_pool("--pool-statusline", folder, stdin=json.dumps(live(5, now + 7200 + 30)), NO_COLOR="1")
+        self.assertIn("pool: a · 9%", r.stdout)
+        self.assertEqual(self.read_usage()["a"]["five_hour"], 9)
+        self.run_pool("--pool-statusline", folder, stdin=json.dumps(live(80, now - 100)))  # an earlier window
+        self.assertEqual(self.read_usage()["a"]["five_hour"], 9)
+        self.run_pool("--pool-statusline", folder, stdin=json.dumps(live(11, now + 7200)))  # more: kept
+        self.assertEqual(self.read_usage()["a"]["five_hour"], 11)
+        self.run_pool("--pool-statusline", folder, stdin=json.dumps(live(2, now + 20000)))  # a new window
+        row = self.read_usage()["a"]
+        self.assertEqual((row["five_hour"], row["resets_ts"], row["seven_day"]), (2, now + 20000, 30))
+
+    def test_statusline_reruns_while_idle(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.run_pool("hi")
+        self.assertEqual(self.sessions()[-1]["settings"]["statusLine"]["refreshInterval"], 30)
 
     def test_statusline_warns_in_red_with_no_next_account(self):
         now = time.time()

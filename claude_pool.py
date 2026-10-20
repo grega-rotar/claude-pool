@@ -858,6 +858,8 @@ RESUME_PROMPT = "Continue where you left off. Your last turn was cut off by a us
 # Flags that start a session elsewhere, return at once or turn hooks off: claude gets the terminal to itself.
 EXEC_FLAGS = {"-h", "--help", "-v", "--version", "--bg", "--background", "--desktop", "--cloud", "--environment",
               "--teleport", "--bare", "--safe-mode"}
+# Flags that go on with an earlier session.
+RESUME_FLAGS = {"-c", "--continue", "-r", "--resume", "--from-pr"}
 # Flags that pick or make the session: dropped on a switch, since --resume <id> takes their place.
 SESSION_FLAGS = {"-c", "--continue", "-r", "--resume", "--session-id", "--fork-session", "--from-pr", "-w",
                  "--worktree", "--tmux"}
@@ -1020,7 +1022,9 @@ def with_hook(args, spec, folder, banner=True):
         if (settings.get("statusLine") or {}).get("command"):
             with open(os.path.join(folder, "statusline.json"), "w", encoding="utf-8") as fh:
                 json.dump(settings["statusLine"], fh)
-        settings["statusLine"] = {"type": "command", "command": self_cmd("--pool-statusline", folder)}
+        # Every 30 s too, so an idle session shows what other sessions and checks saved since its last reply.
+        settings["statusLine"] = {"type": "command", "command": self_cmd("--pool-statusline", folder),
+                                  "refreshInterval": 30}
     settings_path = os.path.join(folder, "settings.json")
     with open(settings_path, "w", encoding="utf-8") as fh:
         json.dump(settings, fh)
@@ -1067,19 +1071,35 @@ def outer_statusline(folder, data, raw):
     return r.stdout.rstrip("\n")
 
 
+WINDOW_SLACK = 600  # two reset times this close apart are the same window
+
+
 def live_usage(name, rate_limits):
-    """Save the usage claude hands the status line after each reply, so the pool knows it without a check."""
+    """Save the usage claude hands the status line, so the pool knows it without a check. Those are the numbers of
+    this session's last reply, maybe older than what another session (or a check, which sees other servers' use
+    too) saved since. Within one window usage only goes up, so a lower number for the same window, or one from an
+    earlier window, is left out: an idle session never takes the numbers back."""
     five, week = rate_limits.get("five_hour") or {}, rate_limits.get("seven_day") or {}
-    new = {k: v for k, v in (("five_hour", five.get("used_percentage")), ("resets_ts", five.get("resets_at")),
-                             ("seven_day", week.get("used_percentage")), ("seven_day_resets_ts", week.get("resets_at")))
-           if isinstance(v, (int, float))}
-    if not new:
-        return
-    old = load_usage().get(name) or {}
-    if all(old.get(k) == v for k, v in new.items()) and time.time() - (old.get("checked_ts") or 0) < 60:
+
+    def newer(old):
+        new = {}
+        for key, reset_key, w in (("five_hour", "resets_ts", five), ("seven_day", "seven_day_resets_ts", week)):
+            pct, reset = w.get("used_percentage"), w.get("resets_at")
+            if not isinstance(pct, (int, float)) or not isinstance(reset, (int, float)):
+                continue
+            was = old.get(reset_key) or 0
+            if reset < was - WINDOW_SLACK or (abs(reset - was) <= WINDOW_SLACK and pct <= (old.get(key) or 0)):
+                continue
+            new[key], new[reset_key] = pct, reset
+        return new
+
+    if not newer(load_usage().get(name) or {}):
         return  # nothing new: the status line runs often, the usage file needn't change each time
     with usage_update() as usage:
         row = usage.setdefault(name, {})
+        new = newer(row)  # again under the lock: another session may have saved meanwhile
+        if not new:
+            return
         row.update(new, checked_ts=time.time())
         if new.get("five_hour", 0) < env_num("CLAUDE_POOL_LIMIT", 100) and row.get("status") == "rejected":
             row["status"] = "allowed"
@@ -1723,7 +1743,10 @@ def main(argv=None):
     forced = os.environ.get("CLAUDE_POOL_ACCOUNT")
     if not forced and fresh_secs() > 0:
         refresh_soon(pool)
-    name = forced or choose(pool, load_usage(), prefer=own_account(pool))
+    # A resumed session (Orca reopening its panes) is picked in the pool's order: its pane's own login is only
+    # where it started, maybe hours and several switches ago.
+    resumed = any(f and f.split("=", 1)[0] in RESUME_FLAGS for f, _ in split_args(args, cli_spec(binary)))
+    name = forced or choose(pool, load_usage(), prefer=None if resumed else own_account(pool))
     env = account_env(*pool[name]) if name in pool else child_env()
     if (name in pool and not forced and len(pool) > 1 and os.environ.get("CLAUDE_POOL_SWITCH", "on") != "off"
             and session):
