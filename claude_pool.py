@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.13.1"
+__version__ = "0.13.2"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -1292,8 +1292,9 @@ def next_free(pool, name):
 
 
 def asked_account(pool, name, want):
-    """The account `/pool:switch [want]` moves a session on `name` to, or (None, why not). With no name it's the same pick
-    as at a limit; a named one must see the same conversations and have room, rechecked as next_free does."""
+    """The account `/pool:switch [want]` moves a session on `name` to, or (None, why not), or (name, why) when it
+    stays. With no name it's the pool's pick now; a named one must see the same conversations and have room,
+    rechecked as next_free does."""
     if not want:
         # Already on the account the pool would pick now: stay. This session's own run mark doesn't count, or it
         # would look busy to itself.
@@ -1301,13 +1302,13 @@ def asked_account(pool, name, want):
         own = usage.setdefault(name, {})
         own["running"] = [r for r in own.get("running") or [] if not (r.get("pid") == os.getpid() and r.get("host") == HOST)]
         if choose({n: v for n, v in pool.items() if sessions_dir(*v) == here}, usage) == name:
-            return None, f"{name} is already the best account; staying on it"
+            return name, f"{name} is already the best account; staying on it"
         nxt = next_free(pool, name)
         return (nxt, None) if nxt else (None, "no other account is free right now")
     if want not in pool:
         return None, f"no account {want}; the pool has " + ", ".join(sorted(pool))
     if want == name:
-        return None, f"this session already runs on {want}"
+        return name, f"this session already runs on {want}"
     if sessions_dir(*pool[want]) != sessions_dir(*pool[name]):
         return None, f"{want} can't see this conversation (its claude folder doesn't share projects/)"
     if pool[want][0] != "key":
@@ -1368,7 +1369,12 @@ def prompt_hook(folder):
         pass
     m = POOL_COMMAND.match((data.get("prompt") or "").strip())
     if m:
-        print(json.dumps({"decision": "block", "reason": ask_switch(folder, m.group(1), session)[1]}))
+        # A stop, not a block: one line ("Operation stopped by hook: ..."), and the prompt box is left empty. A block
+        # would put /pool:switch back in the box. Green when it moves or stays as asked, red when it can't.
+        ok, message = ask_switch(folder, m.group(1), session)
+        if os.environ.get("NO_COLOR") is None:
+            message = ("\033[32m" if ok else "\033[31m") + message + "\033[0m"
+        print(json.dumps({"continue": False, "stopReason": message}))
     return 0
 
 
@@ -1444,12 +1450,13 @@ def interactive(args, pool, name, binary, spec):
                 asked = read_failure(switch_file) if os.path.exists(switch_file) else None
                 if asked and asked.get("session_id") and not stopping:
                     nxt, why_not = asked_account(pool, name, asked.get("to"))
-                    try:
+                    try:  # ok: moving or staying as asked, so the hook shows it green
                         write_json(asked["reply"], {"ok": bool(nxt), "message": "claude-pool: " + (
-                            f"moving this session to {nxt}; it restarts in a moment" if nxt else why_not)})
+                            why_not or f"moving this session to {nxt}; it restarts in a moment")})
                     except (OSError, KeyError, TypeError):
                         pass
-                    if not nxt:
+                    if not nxt or nxt == name:
+                        nxt = None
                         continue
                     failure, why = asked, "was left as you asked"
                 else:
