@@ -3,9 +3,44 @@
 ## Picking an account
 
 - **Usage:** each print-mode run reports the account's usage and claude-pool saves it. Numbers older than 5 minutes are rechecked with a tiny Haiku call (~$0.0001), so other apps' use counts too. Print mode waits for that check before it picks. An interactive session doesn't: it starts on the saved numbers and the check runs in the background (only with no saved numbers yet does it check first).
-- **Order:** it uses the account whose week resets soonest first, since leftover usage is lost at the reset. At 90% of the 5-hour limit it moves on. When the weeks tie, the 5-hour window decides the same way. Unused accounts go last.
+- **Order:** see [Weekly pace](#weekly-pace) below. At 90% of the 5-hour or weekly limit it moves on, whatever the strategy. `CLAUDE_POOL_STRATEGY=drain` (the default until 0.16) uses the account whose week resets soonest first; when the weeks tie, the 5-hour window decides the same way, and unused accounts go last. `balance` uses the least used first.
 - **Your own login first:** when the caller's claude folder is one of the pool's accounts (an Orca pane on its account), that account goes first while it's under 90%. Not for a resumed session (`--resume`, `-c`): when Orca reopens its panes, each session is picked in the usual order.
 - **Busy accounts:** past 75% of its 5-hour window, an account that's already running something gets no second run while another has room.
+
+## Weekly pace
+
+`pace` is the default strategy. Each account's 5-hour limit refills every 5 hours, but its weekly limit refills only once a week. An account that spends its week in the first days is gone until its reset, and then the busy hours have one account fewer. `pace` avoids that when it can.
+
+**r**, the weekly % points one full 5-hour window uses, is learned per account from the usage numbers the pool already saves. Anthropic doesn't publish it, so it's an estimate:
+
+- Within one 5-hour window and one week, `r = 100 × (weekly % gained) / (5-hour % gained)`. A sample counts once the 5-hour use grew 5 points. A reset in between, or a number going down, starts over.
+- The last 8 samples of the last 14 days are summed, so the rounding of the whole-percent numbers mostly cancels out and a changed workload ages out. One clear sample 4× off drops the old ones.
+- It's used once 20 points of 5-hour use are behind it. Picks count it higher by `CLAUDE_POOL_PACE_MARGIN` (25%, twice that while under 100 points), plus a point for rounding. `--pool-status` shows that value and how sure it is (low, medium, high).
+- `CLAUDE_POOL_WINDOW_WEEK=20` sets it for every account instead.
+- Each weekly window the usage report lists gets its own `r` (e.g. one for a single model). The tightest one counts.
+
+**The pick**, among the accounts that are free and under 90%:
+
+1. **Room that would be lost anyway:** an account whose weekly room is more than even non-stop use could spend before its reset. Soonest reset first. That's `p ≥ 1`, where `p = (weekly % left / r) / (hours to the reset / 5)`: full 5-hour windows the week still holds, per 5-hour window left.
+2. **No weekly limit:** an account with no weekly numbers (Team accounts list only the 5-hour window). Using it costs no week. Its 5-hour limit still counts.
+3. **The rest, most room for the time left first:** by `p`. An account whose `r` isn't learned yet counts with the pool's middle `r`. With none learned anywhere, the share of the week's room left over the share of its time left decides (1× = on an even pace). Numbers older than an hour (or 4 usage checks) count half as far from even, and never as room to spare.
+
+Values within 25% of each other tie, so the pick doesn't flip on a 1% change. Ties go by the 5-hour window as in `drain`, then by the server's affinity (see [Servers](server.md#several-servers)), then by name.
+
+`pace` can't make more usage than Anthropic gives. It does more work only when `drain` would have run an account's week dry while the busy hours still needed it. With light work, or more work than the weeks hold, every strategy does the same. `python3 tests/simulate.py` compares the three on a few made-up workloads:
+
+| workload | drain | balance | pace |
+|---|---|---|---|
+| small plan whose week resets first, office hours | 89.2% | 97.5% | 97.9% |
+| two plans, office hours | 95.3% | 95.1% | 100% |
+| Team account plus two weekly-limited ones | 92.1% | 98.5% | 98.6% |
+| same plans, staggered resets | 100% | 100% | 100% |
+| more work than the weeks hold | 33.5% | 33.5% | 33.5% |
+| light work | 100% | 100% | 100% |
+
+(Share of the asked work done in two weeks. The model there is simple: usage is seen at once, every job is alike.)
+
+**No weekly numbers = no weekly limit:** an account with no weekly numbers (Team accounts, whose usage report lists only the 5-hour window, and API keys) counts as unlimited for the week. Only its 5-hour limit counts.
 
 ## Interactive sessions
 

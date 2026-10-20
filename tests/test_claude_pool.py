@@ -125,7 +125,9 @@ class PoolTest(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_POOL", "ANTHROPIC", "CLAUDE_CODE", "ORCA_"))
                     and k not in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "APPDATA")}
         self.env.update(HOME=self.tmp, USERPROFILE=self.tmp)
-        self.env.update(CLAUDE_POOL_ORCA="off", CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
+        # drain: these tests count on its name order when nothing else differs. pace has its own tests below and in
+        # test_pace.py.
+        self.env.update(CLAUDE_POOL_STRATEGY="drain", CLAUDE_POOL_ORCA="off", CLAUDE_POOL_FRESH="0", CLAUDE_POOL_DIR=self.pool, CLAUDE_POOL_STATE=self.state, CLAUDE_POOL_BINARY=self.fake,
                         FAKE_LOG=self.log, COLUMNS="0")
 
     def add(self, name, secret, ext=".token"):
@@ -274,6 +276,31 @@ class PoolTest(unittest.TestCase):
         self.usage(rows)
         self.run_pool("-p", "hi")
         self.assertEqual(self.calls()[-1]["token"], "tok-a")
+
+    def test_pace_is_the_default_and_keeps_a_small_plan_from_running_dry(self):
+        now = time.time()
+        self.add("small", "tok-small")
+        self.add("big", "tok-big")
+        rows = {"small": {"seven_day": 30, "seven_day_resets_ts": now + 72 * 3600, "checked_ts": now,
+                          "pace": {"seven_day": {"r": 40, "n": 200}}},
+                "big": {"seven_day": 30, "seven_day_resets_ts": now + 120 * 3600, "checked_ts": now,
+                        "pace": {"seven_day": {"r": 10, "n": 200}}}}
+        self.usage(rows)
+        self.run_pool("-p", "hi", CLAUDE_POOL_STRATEGY="")
+        self.assertEqual(self.calls()[-1]["token"], "tok-big")
+        self.usage(rows)  # the run saved the fake's numbers: back to the same start
+        self.run_pool("-p", "hi")  # drain: the week that resets first
+        self.assertEqual(self.calls()[-1]["token"], "tok-small")
+        self.usage(rows)
+        status = self.run_pool("--pool-status", CLAUDE_POOL_STRATEGY="").stdout
+        self.assertIn("saving its week", [l for l in status.splitlines() if " small " in l][0])
+
+    def test_runs_teach_the_pool_r(self):
+        self.add("a", "tok-a")
+        for util in ("0.2", "0.5"):  # the fake's weekly use is half its 5-hour use: r = 50
+            self.run_pool("-p", "hi", FAKE_UTIL=util)
+        with open(self.state) as f:
+            self.assertEqual(json.load(f)["a"]["pace"]["seven_day"]["r"], 50.0)
 
     def test_skips_account_at_limit(self):
         self.add("a", "tok-a")

@@ -32,7 +32,12 @@ Then check as each user: `sudo -u www-data claude-pool --pool-check`.
 
 ## Several servers
 
-Copy the same token files to each server. Each sees the others' use at the 5-minute check.
+Copy the same token files to each server. Each sees the others' use at the 5-minute check, since the usage numbers come from Anthropic and count every server's use.
+
+- **No shared database:** each server keeps its own usage file. Nothing else needs to be set up.
+- **They spread out:** when two accounts are equally good, each server breaks the tie its own way, from `CLAUDE_POOL_SERVER_ID` (default: the host name). So servers tend to start on different accounts. This never beats room: a fuller account isn't picked because of it.
+- **Best effort, not a reservation:** two servers can still pick the same account at the same moment, and a server only counts its own running sessions. Without a shared lock that can't be avoided. Each sees the other's use at its next check.
+- Each server learns `r` on its own, from the same numbers, so they end up close.
 
 ## Windows
 

@@ -7,7 +7,7 @@ Every command only reads or writes these files, so you can do the same with a te
 | Accounts | `~/.config/claude-pool/` (Windows: `%APPDATA%\claude-pool\`) | `CLAUDE_POOL_DIR` |
 | One account | `<name>.token` or `<name>.key`, the secret alone on one line | |
 | An account taken out | `<name>.token.off` / `<name>.key.off` | |
-| Usage of every account | `~/.local/state/claude-pool/usage.json` | `CLAUDE_POOL_STATE` |
+| Usage of every account, and the samples `r` is learned from | `~/.local/state/claude-pool/usage.json` | `CLAUDE_POOL_STATE` |
 | Event log | `events.log` next to the usage file | `CLAUDE_POOL_LOG` |
 | Settings | environment variables, or `CLAUDE_POOL_*` lines in the nearest `.env` | `CLAUDE_POOL_ENV_FILE` |
 
@@ -15,7 +15,7 @@ Every command only reads or writes these files, so you can do the same with a te
 
 ## Start the usage numbers over
 
-Delete `usage.json`. The next run or `claude-pool --pool-refresh` checks every account again.
+Delete `usage.json`. The next run or `claude-pool --pool-refresh` checks every account again. The learned `r` starts over too.
 
 ## Update claude-pool
 

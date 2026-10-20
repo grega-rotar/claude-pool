@@ -24,6 +24,7 @@ seconds are refreshed before a pick with one tiny Haiku call per account, so use
 import getpass
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 
@@ -45,7 +47,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -72,6 +74,7 @@ Commands:
   --pool-switch [name]     inside a session (a `!` command or claude's Bash): move it to the named account, or
                            the best free one; typing /pool:switch [name] in the session does the same
                            (and /pool:status, /pool:log [N] show those two in the session)
+  --pool-capacity <r>      what 1 to 100 accounts would hold if one 5-hour window took r% of a week
   --pool-version           version
 
 Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optional):
@@ -82,7 +85,11 @@ Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optio
   CLAUDE_POOL_LOG          event log             {log}
   CLAUDE_POOL_BINARY       the real claude       claude
   CLAUDE_POOL_ACCOUNT      always use this account, no switching, no checks
-  CLAUDE_POOL_STRATEGY     drain (soonest weekly reset first) or balance (least used first)
+  CLAUDE_POOL_STRATEGY     pace (weekly room over time left), drain (soonest weekly reset first) or balance
+                           (least used first) (pace)
+  CLAUDE_POOL_WINDOW_WEEK  weekly % points one full 5-hour window uses, instead of the learned estimate
+  CLAUDE_POOL_PACE_MARGIN  safety margin on the learned estimate, 0.25 = 25% (0.25)
+  CLAUDE_POOL_SERVER_ID    this server's name, so servers sharing accounts prefer different ones (host name)
   CLAUDE_POOL_SWITCH_AT    5-hour or 7-day % after which the next account is preferred (90)
   CLAUDE_POOL_SPREAD_AT    5-hour % after which a busy account gets no second run (75)
   CLAUDE_POOL_FRESH        seconds between usage checks, 0 = off (300)
@@ -436,9 +443,9 @@ def mark_running(name, on):
         row["running"] = marks
 
 
-def at_limit(row, now=None):
+def at_limit(row, now=None, full=None):
     """When the account's last known usage says wait: the reset time (Unix), else None."""
-    now, full = now or time.time(), env_num("CLAUDE_POOL_LIMIT", 100)
+    now, full = now or time.time(), env_num("CLAUDE_POOL_LIMIT", 100) if full is None else full
     week_reset = row.get("seven_day_resets_ts") or 0
     if (row.get("seven_day") or 0) >= full and week_reset > now:
         return week_reset
@@ -458,32 +465,199 @@ def seven_day(row, now):
     return (row.get("seven_day") or 0) if (row.get("seven_day_resets_ts") or 0) > now else 0
 
 
+WEEK_HOURS = 168
+WINDOWS_PER_WEEK = WEEK_HOURS / 5  # 33.6 five-hour windows fit in a week
+PACE_STEP = 0.25  # pace values this close count as equal, so picks don't flip on a 1% change
+MIN_LEARNED = 20  # 5-hour % points of samples before a learned r is used
+SAMPLES = 8  # samples kept per weekly window
+SAMPLE_AGE = 14 * 86400
+
+
+def weeks(row):
+    """[(key, used %, reset ts)] of the account's weekly windows: seven_day, plus any other weekly window the usage
+    report listed (e.g. one model's own)."""
+    out = []
+    if isinstance(row.get("seven_day"), (int, float)):
+        out.append(("seven_day", row["seven_day"], row.get("seven_day_resets_ts") or 0))
+    extra = row.get("weeks")
+    for k, v in (extra.items() if isinstance(extra, dict) else ()):
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (int, float)) and isinstance(v[1], (int, float)):
+            out.append((k, v[0], v[1]))
+    return out
+
+
+def learn(row, now=None):
+    """Learn r, the weekly % one full 5-hour window uses, from the usage numbers just saved in `row`: within one
+    5-hour and one weekly window, r = 100 * (weekly % gained) / (5-hour % gained). A reading starts a new anchor
+    when either window has reset or a number went down; it becomes a sample once the 5-hour use grew 5 points
+    since the anchor. The last SAMPLES samples of the last 14 days are summed, so rounding mostly cancels out and
+    a changed workload ages out. Kept per weekly window in row["pace"]."""
+    now = now or time.time()
+    five, reset5 = row.get("five_hour"), row.get("resets_ts")
+    if row.get("weekly") == "none":
+        row.pop("pace", None)  # no weekly limit (any more): what was learned for it no longer applies
+        return
+    if not isinstance(five, (int, float)) or not isinstance(reset5, (int, float)):
+        return
+    pace = row.get("pace") if isinstance(row.get("pace"), dict) else {}
+    for key, week, reset7 in weeks(row):
+        st = pace.get(key) if isinstance(pace.get(key), dict) else {}
+        cur = [five, reset5, week, reset7]
+        a = st.get("a")
+        if not (isinstance(a, list) and len(a) == 4 and all(isinstance(x, (int, float)) for x in a)) \
+                or abs(reset5 - a[1]) > WINDOW_SLACK or abs(reset7 - a[3]) > WINDOW_SLACK:
+            st["a"] = cur  # first reading, or a window reset since: start over from here
+        elif five < a[0] or week < a[2]:
+            st["a"] = cur  # went down within a window: a mixed-up reading, not a sample
+        elif five - a[0] >= 5:
+            d5, d7 = five - a[0], week - a[2]
+            samples = [x for x in st.get("s") or [] if isinstance(x, list) and len(x) == 3 and now - x[2] < SAMPLE_AGE]
+            if samples and d5 >= 25 and d7 > 1 and isinstance(st.get("r"), (int, float)) \
+                    and not st["r"] / 4 <= 100 * d7 / d5 <= st["r"] * 4:
+                samples = []  # a clear sample 4x off: the plan or the workload changed, old ones don't fit
+            samples = (samples + [[d5, d7, now]])[-SAMPLES:]
+            s5, s7 = sum(x[0] for x in samples), sum(x[1] for x in samples)
+            st.update(a=cur, s=samples, r=round(100 * s7 / s5, 2), n=round(s5, 1), ts=now)
+        pace[key] = st
+    row["pace"] = pace
+
+
+def pace_opts():
+    """The settings pace() reads, read once per pick: (stale after s, CLAUDE_POOL_WINDOW_WEEK, margin, server id)."""
+    return (stale_secs(), env_num("CLAUDE_POOL_WINDOW_WEEK", 0), env_num("CLAUDE_POOL_PACE_MARGIN", 0.25),
+            os.environ.get("CLAUDE_POOL_SERVER_ID") or HOST)
+
+
+def ratio(row, key="seven_day", opts=None):
+    """(r, how sure) for one weekly window: CLAUDE_POOL_WINDOW_WEEK, else the learned r with a margin on top
+    (CLAUDE_POOL_PACE_MARGIN, doubled while there is little to learn from, plus one point for rounding), else
+    (None, None). How sure: "set", "low", "medium" or "high"."""
+    _, fixed, margin, _ = opts or pace_opts()
+    if key == "seven_day" and fixed > 0:
+        return fixed, "set"
+    st = (row.get("pace") or {}).get(key) if isinstance(row.get("pace"), dict) else None
+    try:
+        n, r = float(st["n"]), float(st["r"])
+    except (TypeError, KeyError, ValueError):
+        return None, None
+    if n < MIN_LEARNED:
+        return None, None
+    sure = min(1.0, n / 100)
+    margin *= 2 - sure
+    return (r + 100 / n) * (1 + margin), "high" if sure >= 1 else "medium" if n >= 50 else "low"
+
+
+def stale_secs():
+    return max(4 * fresh_secs(), 3600)
+
+
+def pace(row, now, kind="token", opts=None):
+    """How the account's weekly limit stands, as (state, s, p, r, sure, left):
+
+    state: none (no weekly numbers: no weekly limit, as on Team accounts and API keys), stale (numbers older than
+    stale_secs()) or known.
+    s: share of the week's room left over share of the week's time left. 1 = on an even pace, 2 = twice the room
+    it needs; for none 1. Stale numbers count half as far from 1.
+    p: full 5-hour windows the weekly room still holds, per 5-hour window left before the reset. From 1 up, even
+    non-stop use can't spend the week before it resets. None without r, or with stale numbers.
+    r, sure: ratio(); left: weekly % left. With several weekly windows, the tightest one counts."""
+    ws = weeks(row)
+    if kind == "key" or row.get("weekly") == "none" or not ws:
+        return "none", 1.0, None, None, None, None
+    opts = opts or pace_opts()
+    stale = now - (row.get("checked_ts") or 0) > opts[0]
+    best = None
+    for key, used, reset in ws:
+        live = reset > now
+        left = max(0.0, 100.0 - used) if live else 100.0  # reset since: a full week from its first use
+        hours = max(0.5, (reset - now) / 3600) if live else WEEK_HOURS
+        s = (left / 100) / (hours / WEEK_HOURS)
+        r, sure = ratio(row, key, opts)
+        p = (left / r) / (hours / 5) if r and not stale else None
+        if best is None or s < best[1]:
+            best = ("stale" if stale else "known", 1 + (s - 1) / 2 if stale else s, p, r, sure, left)
+    return best
+
+
+def pace_values(info):
+    """({name: value}, the middle value) for {name: pace()}: p, or p at the pool's middle r when the account's own
+    isn't learned yet (with none learned anywhere that is s). Accounts with no weekly limit get none."""
+    rs = sorted(i[3] for i in info.values() if i[3])
+    mid_r = rs[len(rs) // 2] if rs else 100 / WINDOWS_PER_WEEK  # 100/33.6 makes p equal s
+    out = {n: i[1] * 100 / ((i[3] or mid_r) * WINDOWS_PER_WEEK) for n, i in info.items() if i[0] != "none"}
+    return out, sorted(out.values())[len(out) // 2] if out else 1
+
+
+def affinity(name, server):
+    """A fixed number per (server, account): servers sharing accounts break ties differently."""
+    return zlib.crc32(f"{server}:{name}".encode())
+
+
+def strategy():
+    v = (os.environ.get("CLAUDE_POOL_STRATEGY") or "pace").lower()
+    return v if v in ("pace", "drain", "balance") else "pace"
+
+
+def tiers(pool, usage, skip=(), now=None):
+    """(free, roomy, calm): free = not full and not refused; roomy = under CLAUDE_POOL_SWITCH_AT percent of its
+    5-hour and 7-day windows; calm = roomy and not past CLAUDE_POOL_SPREAD_AT while it is already running something.
+    Every strategy picks from calm, then roomy, then free."""
+    now = now or time.time()
+    row = lambda n: usage.get(n) or {}  # noqa: E731
+    full, fresh = env_num("CLAUDE_POOL_LIMIT", 100), fresh_secs()
+    free = [n for n in pool if n not in skip and not at_limit(row(n), now, full) and not broken(row(n), now, fresh)]
+    switch_at, spread_at = env_num("CLAUDE_POOL_SWITCH_AT", 90), env_num("CLAUDE_POOL_SPREAD_AT", 75)
+    roomy = [n for n in free if five_hour(row(n), now) < switch_at and seven_day(row(n), now) < switch_at]
+    calm = [n for n in roomy if not (five_hour(row(n), now) >= spread_at and running(row(n), now))]
+    return free, roomy, calm
+
+
 def choose(pool, usage, skip=(), now=None, prefer=None):
     """The free account to run on next, else None.
 
-    drain (default): the account whose 7-day window resets soonest, since its unused room is lost first; then the
+    pace (default): first an account whose week resets with more room than even non-stop use could spend (p >= 1),
+    soonest reset first, since that room is lost anyway; then accounts with no weekly limit (no weekly numbers).
+    Then the most weekly room for the time left, in full 5-hour windows (p), so no account runs out of its week early
+    while another still has plenty: an account whose r isn't known yet counts with the pool's middle r (no r at
+    all: s). Values within PACE_STEP of each other tie, so picks don't flip
+    on a 1% change; ties go by the 5-hour window as in drain, then by this server's affinity, so servers sharing
+    accounts spread out.
+    drain: the account whose 7-day window resets soonest, since its unused room is lost first; then the
     most used. Accounts with no live window (never used, or reset since) come last, so they don't start a window
-    before it's needed. Ties (often no 7-day numbers at all) go the same way by the 5-hour window. An account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour or 7-day window is used only when every
+    before it's needed. Ties (often no 7-day numbers at all) go the same way by the 5-hour window.
+    balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0.
+    Every strategy uses an account past CLAUDE_POOL_SWITCH_AT percent of its 5-hour or 7-day window only when every
     free account is, so a run is less likely to be cut off midway; and one past CLAUDE_POOL_SPREAD_AT that is
-    already running something gets no second run while another account has room.
-    balance: the lowest 7-day usage (then 5-hour), spreading the load. Never used counts as 0."""
+    already running something gets no second run while another account has room."""
     now = now or time.time()
     row = lambda n: usage.get(n) or {}  # noqa: E731
-    free = [n for n in pool if n not in skip and not at_limit(row(n), now) and not broken(row(n), now)]
-    if os.environ.get("CLAUDE_POOL_STRATEGY") == "balance":
-        return min(free, key=lambda n: (row(n).get("seven_day") or 0, five_hour(row(n), now)), default=None)
-    switch_at = env_num("CLAUDE_POOL_SWITCH_AT", 90)
-    roomy = [n for n in free if five_hour(row(n), now) < switch_at and seven_day(row(n), now) < switch_at]
-    calm = [n for n in roomy if not (running(row(n), now) and five_hour(row(n), now) >= env_num("CLAUDE_POOL_SPREAD_AT", 75))]
+    free, roomy, calm = tiers(pool, usage, skip, now)
+    how = strategy()
+    if how == "balance":
+        return min(calm or roomy or free, key=lambda n: (row(n).get("seven_day") or 0, five_hour(row(n), now)), default=None)
 
     def drain(reset, used):
         live = reset > now
         return (not live, reset if live else 0, -used if live else 0)
 
-    def key(n):
-        r = row(n)
-        return (drain(r.get("seven_day_resets_ts") or 0, r.get("seven_day") or 0)
-                + drain(r.get("resets_ts") or 0, r.get("five_hour") or 0) + (n,))
+    def five(r):
+        return drain(r.get("resets_ts") or 0, r.get("five_hour") or 0)
+
+    if how == "drain":
+        key = lambda n: drain(row(n).get("seven_day_resets_ts") or 0, row(n).get("seven_day") or 0) + five(row(n)) + (n,)  # noqa: E731
+    else:
+        opts = pace_opts()
+        info = {n: pace(row(n), now, pool[n][0], opts) for n in calm or roomy or free}
+        values, _ = pace_values(info)
+        step = math.log(1 + PACE_STEP)
+
+        def key(n):
+            r, (state, _, p) = row(n), info[n][:3]
+            if p is not None and p >= 1:
+                return (0, min(t if t > now else now + WEEK_HOURS * 3600 for _, _, t in weeks(r))) + five(r) + (affinity(n, opts[3]), n)
+            if state == "none":
+                return (1, 0) + five(r) + (affinity(n, opts[3]), n)
+            return (2, -math.floor(math.log(max(values[n], 1e-3)) / step)) + five(r) + (affinity(n, opts[3]), n)
     if prefer in calm:  # the caller's own login (an Orca pane's account) while it has room
         return prefer
     return min(calm or roomy or free, key=key, default=None)
@@ -493,9 +667,9 @@ def fresh_secs():
     return env_num("CLAUDE_POOL_FRESH", 300)
 
 
-def broken(row, now=None):
+def broken(row, now=None, fresh=None):
     """The account's token was refused at its last check: skip it until rechecked."""
-    return bool(row.get("error_ts")) and (now or time.time()) - row["error_ts"] < max(fresh_secs(), 300)
+    return bool(row.get("error_ts")) and (now or time.time()) - row["error_ts"] < max(fresh_secs() if fresh is None else fresh, 300)
 
 
 PROBE = ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", "", "--system-prompt", "Reply ok.",
@@ -617,6 +791,17 @@ def record(name, info, ran=True, error=None):
                        resets_ts=(w.get("five_hour") or {}).get("resetsAt") or info.get("resetsAt"),
                        seven_day_resets_ts=(w.get("seven_day") or {}).get("resetsAt") or row.get("seven_day_resets_ts"),
                        checked_ts=time.time())
+            if "seven_day" in w:
+                row.pop("weekly", None)
+            elif w:  # the report lists the account's windows and no weekly one: no weekly limit (Team accounts)
+                row.update(weekly="none", seven_day=None, seven_day_resets_ts=None)
+            extra = {k: [round(100 * (v.get("utilization") or 0), 1), v["resetsAt"]] for k, v in w.items()
+                     if k.startswith("seven_day_") and isinstance(v, dict) and isinstance(v.get("resetsAt"), (int, float))}
+            if extra:
+                row["weeks"] = extra
+            else:
+                row.pop("weeks", None)
+            learn(row)
             row.pop("error", None)
             row.pop("error_ts", None)
         elif error:
@@ -1104,6 +1289,9 @@ def live_usage(name, rate_limits):
         if not new:
             return
         row.update(new, checked_ts=time.time())
+        if "seven_day" in new:
+            row.pop("weekly", None)
+        learn(row)
         if new.get("five_hour", 0) < env_num("CLAUDE_POOL_LIMIT", 100) and row.get("status") == "rejected":
             row["status"] = "allowed"
 
@@ -1561,18 +1749,45 @@ def status(here=None, color=None):
         day = "" if t.date() == datetime.fromtimestamp(now).date() else t.strftime("%a ")
         return f"{day}{t:%H:%M} (in {left // 60}h{left % 60:02d}m)" if left >= 60 else f"{day}{t:%H:%M} (in {left}m)"
 
+    _, roomy, calm = tiers(pool, usage, now=now)
+    weekly = {n: pace(usage.get(n) or {}, now, pool[n][0]) for n in pool}
+    values, mid = pace_values(weekly)
+
+    def why(n):
+        """Why the pool takes the account when it does (pace), or holds it back."""
+        if n not in roomy:
+            return f"past {switch_at:g}%"
+        if n not in calm:
+            return "busy"
+        if strategy() != "pace":
+            return ""
+        st, _, p = weekly[n][:3]
+        if p is not None and p >= 1:
+            return "week resets with room to spare"
+        if st == "none":
+            return "no weekly limit"
+        return "saving its week" if values[n] < mid / 1.25 else "week to spare" if values[n] > mid * 1.25 else ""
+
     def state(n, r):
         if broken(r):
             err = (r.get("error") or "token refused").split(" · ")[0]
             return "broken: " + (err if len(err) <= 80 else err[:79] + "…")
         reset = at_limit(r)
         busy = len(running(r, now))
-        s = f"full until {when(reset).split(' (')[0]}" if reset else ""
+        s = f"full until {when(reset).split(' (')[0]}" if reset else why(n)
         return ", ".join(x for x in ("this session" if n == here else "", s, f"{busy} running" if busy else "") if x)
 
+    def week_cells(n):
+        """pace (s), r with how sure, and full 5-hour windows the week has left."""
+        st, s, _, rr, sure, left = weekly[n]
+        if st == "none":
+            return ["no limit", "-", "-"]
+        return [(f"{s:.1f}x" if s < 10 else ">10x") + (" stale" if st == "stale" else ""), f"{rr:.0f} {sure}" if rr else "-",
+                f"{left / rr:.1f}" if rr else "-"]
+
     mixed = any(kind == "key" for kind, _ in pool.values())  # a kind column only when API keys are in the pool
-    head = ["#", "account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "checked", "runs",
-                                                             "status"]
+    head = ["#", "account"] + (["kind"] if mixed else []) + ["5h", "7d", "5h resets", "7d resets", "pace", "r", "left",
+                                                             "checked", "runs", "status"]
     rows = [[(c, "1;2") for c in head]]  # (text, colour) per cell
     for i, n in enumerate(order):
         kind, r = pool[n][0], usage.get(n) or {}
@@ -1584,14 +1799,42 @@ def status(here=None, color=None):
                      (n, "31" if out else "1;32" if n == best else "")] +
                     ([(kind, "2")] if mixed else []) +
                     [(pct(five), level(five)), (pct(week), level(week)),
-                     (when(r.get("resets_ts")), "2"), (when(r.get("seven_day_resets_ts")), "2"),
-                     ("-" if not r.get("checked_ts") else f"{int((now - r['checked_ts']) // 60)}m ago", "2"),
+                     (when(r.get("resets_ts")), "2"), (when(r.get("seven_day_resets_ts")), "2")] +
+                    [(c, "2") for c in week_cells(n)] +
+                    [("-" if not r.get("checked_ts") else f"{int((now - r['checked_ts']) // 60)}m ago", "2"),
                      (str(r.get("runs", 0)), "2"),
                      (st, "31" if out else "36" if n == here else "32" if n == best else "")])
     widths = [max(len(x[i][0]) for x in rows) for i in range(len(head) - 1)]
     paint = lambda t, c: f"\033[{c}m{t}\033[0m" if color and c and t.strip() else t  # noqa: E731
     for x in rows:
         print("  ".join(paint(t.ljust(w), c) for (t, c), w in zip(x, widths)) + "  " + paint(*x[-1]))
+    est = [weekly[n] for n in pool if weekly[n][3]]
+    if est:
+        print("\n" + paint("Estimates from usage, not Anthropic's numbers. pace: week room left over week time left "
+                            "(1x = even). r: week % one full 5-hour window uses, with a safety margin. left: full 5-hour "
+                            "windows left this week.", "2"))
+        print(f"{len(est)} account{'s' if len(est) > 1 else ''} with an estimate: "
+              f"{sum(100 / w[3] for w in est):.1f} full 5-hour windows a week, "
+              f"{sum(w[5] / w[3] for w in est):.1f} left before their resets, "
+              f"{sum(min(1, 100 / w[3] / WINDOWS_PER_WEEK) for w in est):.1f} accounts' worth of non-stop use")
+        rest = [w[0] for w in weekly.values() if not w[3]]
+        if rest.count("none"):
+            print(f"{rest.count('none')} with no weekly limit: only their 5-hour windows limit them")
+        if len(rest) - rest.count("none"):
+            print(f"{len(rest) - rest.count('none')} not estimated yet (too little use to learn from)")
+    return 0
+
+
+def capacity(r):
+    """--pool-capacity <r>: what identical accounts would hold if one full 5-hour window took r% of their week.
+    Hypothetical: the pool's own estimates are in --pool-status."""
+    per = 100 / r
+    print(f"Hypothetical: every account the same, one full 5-hour window = {r:g}% of its week.")
+    print(f"One account: {per:.1f} full 5-hour windows a week, {min(1, per / WINDOWS_PER_WEEK):.0%} of non-stop use "
+          f"(a week holds {WINDOWS_PER_WEEK:g} five-hour windows).\n")
+    print("accounts  windows/week  non-stop accounts  hours of 5-hour use a week")
+    for n in (1, 2, 3, 4, 5, 6, 10, 100):
+        print(f"{n:<8}  {n * per:<12.1f}  {n * min(1, per / WINDOWS_PER_WEEK):<17.2f}  {n * min(per, WINDOWS_PER_WEEK) * 5:.0f}")
     return 0
 
 
@@ -1792,6 +2035,13 @@ def main(argv=None):
             sys.exit("claude-pool: --pool-watch takes the minutes between checks, e.g. --pool-watch 10")
     if cmd == "--pool-check":
         return check()
+    if cmd == "--pool-capacity":
+        try:
+            r = float(rest[0])
+            assert r > 0
+        except (IndexError, ValueError, AssertionError):
+            sys.exit("claude-pool: --pool-capacity takes r, the week % one full 5-hour window uses, e.g. --pool-capacity 20")
+        return capacity(r)
     if cmd == "--pool-add":
         return add(rest[0] if rest else "")
     if cmd in ("--pool-off", "--pool-on"):
