@@ -3,6 +3,8 @@
 ## 0.16.1
 
 - **"better now" in the status line:** when the pool would pick another account than the session's own now, the status line says so in red, `better now: factory 27% · /pool:switch`, instead of `next: factory 27%`. A session only moves by itself at its limit, so an older one could sit on an account the pool no longer prefers without showing it.
+- **Shorter status line on a narrow terminal:** when it doesn't fit, it drops the words: `orca-editors · 6% · 18:00 · w40% · → factory 27%`.
+- **One account in the pool twice:** `claude-pool --pool-same factory orca-factory` tells the pool a token and an Orca login are the same account, so both rows always show the newest numbers (before, the one without a session kept old numbers for a long time). A token doesn't say whose it is, so the pool can't tell by itself; `--pool-status` suggests the command when two accounts' 5-hour windows reset at the same second. The list lives in a `same` file in the account folder.
 
 ## 0.16.0
 

@@ -74,7 +74,8 @@ Commands:
   --pool-switch [name]     inside a session (a `!` command or claude's Bash): move it to the named account, or
                            the best free one; typing /pool:switch [name] in the session does the same
                            (and /pool:status, /pool:log [N] show those two in the session)
-  --pool-capacity <r>      what 1 to 100 accounts would hold if one 5-hour window took r% of a week
+  --pool-same <a> <b>..    these accounts are one (a token and the same login in Orca): they share usage numbers
+  --pool-capacity <r>     what 1 to 100 accounts would hold if one 5-hour window took r% of a week
   --pool-version           version
 
 Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optional):
@@ -396,6 +397,58 @@ def load_usage():
         return {}
 
 
+SAME_FIELDS = ("status", "five_hour", "seven_day", "resets_ts", "seven_day_resets_ts", "checked_ts", "weekly", "weeks",
+               "pace", "error", "error_ts")
+
+
+def same_groups():
+    """Account names that are one Anthropic account (a token and the same login in Orca), from the `same` file in
+    the account folder: one group per line, names split by spaces. A token doesn't say whose it is, so this is told."""
+    try:
+        with open(os.path.join(pool_dir(), "same"), encoding="utf-8") as f:
+            return [g for g in (line.split() for line in f) if len(g) > 1]
+    except OSError:
+        return []
+
+
+def sync_same(usage):
+    """Give every account of a same_groups() group the newest usage numbers any of them has. Run marks stay apart."""
+    for group in same_groups():
+        rows = [usage[n] for n in group if isinstance(usage.get(n), dict)]
+        if not rows:
+            continue
+        newest = max(rows, key=lambda r: r.get("checked_ts") or 0)
+        for n in group:
+            row = usage.setdefault(n, {})
+            for k in SAME_FIELDS:
+                if k in newest:
+                    row[k] = newest[k]
+                else:
+                    row.pop(k, None)
+
+
+def same(names):
+    """--pool-same a b [...]: these accounts are one; with no names, list the groups."""
+    if not names:
+        for g in same_groups():
+            print(" ".join(g))
+        return 0
+    if len(names) < 2:
+        sys.exit("claude-pool: --pool-same takes two or more account names, e.g. --pool-same factory orca-factory")
+    for n in names:
+        valid_name(n)
+    path = os.path.join(pool_dir(), "same")
+    groups = [g for g in same_groups() if not set(g) & set(names)] + [list(dict.fromkeys(names))]
+    os.makedirs(pool_dir(), mode=0o700, exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        f.write("".join(" ".join(g) + "\n" for g in groups))
+    replace(path + ".tmp", path)
+    with usage_update():
+        pass  # syncs them now
+    print(f"{' and '.join(names)} are one account now: they share their usage numbers")
+    return 0
+
+
 @contextmanager
 def usage_update():
     """The usage dict to change in place, written back whole under the lock so parallel callers lose nothing."""
@@ -403,6 +456,7 @@ def usage_update():
     with locked(path + ".lock"):
         usage = load_usage()
         yield usage
+        sync_same(usage)
         with open(path + ".tmp", "w") as f:
             json.dump(usage, f, indent=1)
         share(path + ".tmp")
@@ -1308,14 +1362,8 @@ def banner(session, data, color=True):
     row = usage.get(name) or {}
     clock = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
     level = lambda pct: "31" if pct >= env_num("CLAUDE_POOL_SWITCH_AT", 90) else "33" if pct >= 70 else "32"  # noqa: E731
-    pieces = [("2", f"pool: {name}")]  # (color, text), joined by dim dots
     five, reset = row.get("five_hour"), row.get("resets_ts") or 0
-    if five is not None and reset > now:
-        pieces += [(level(five), f"{five:.0f}%"), ("2", f"resets {clock(reset)}")]
-    elif five is not None:  # the 5-hour window has reset since
-        pieces.append(("32", "0%"))
-    if row.get("seven_day") is not None and (row.get("seven_day_resets_ts") or 0) > now:
-        pieces.append((level(row["seven_day"]), f"week {row['seven_day']:.0f}%"))
+    week = row.get("seven_day") if (row.get("seven_day_resets_ts") or 0) > now else None
     here = (pool.get(name) or {}).get("sessions")
     others = {n: (v.get("kind"), None) for n, v in pool.items() if v.get("sessions") == here}
     nxt = choose(others, usage, skip={name}, now=now)
@@ -1324,22 +1372,39 @@ def banner(session, data, color=True):
     mine = {**row, "running": [r for r in row.get("running") or []
                                 if not (r.get("pid") == session.get("pid") and r.get("host") == HOST)]}
     better = nxt and choose(others, {**usage, name: mine}, now=now) == nxt
-    if nxt:
-        n5 = five_hour(usage.get(nxt) or {}, now)
-        pieces.append(("31", f"better now: {nxt}") if better else ("2", f"next: {nxt}"))
-        if n5:
-            pieces.append((level(n5), f"{n5:.0f}%"))
-        if better:
-            pieces.append(("31", "/pool:switch"))
-    else:
-        resets = [r for r in (at_limit(usage.get(n) or {}, now) for n in others if n != name) if r]
-        pieces.append(("31", "⚠ no next account" + (f" until {clock(min(resets))}" if resets else "")))
-    joined = [(pieces[0][1], pieces[0][0])]
-    for c, t in pieces[1:]:  # a next account's % sits right after its name, without a dot
-        joined.append((" " if t[0].isdigit() and joined[-1][0].startswith(("next: ", "better now: ")) else " · ", None))
-        joined.append((t, c))
-    plain = "".join(t for t, _ in joined)
-    pad = " " * max(0, terminal_width() - 4 - len(plain))  # claude indents the line and keeps a margin on the right
+    n5 = five_hour(usage.get(nxt) or {}, now) if nxt else 0
+    resets = [r for r in (at_limit(usage.get(n) or {}, now) for n in others if n != name) if r]
+
+    def pieces(short):
+        """(color, text, glued) pieces of the line; short: the same with fewer words, for a narrow terminal."""
+        out = [("2", name if short else f"pool: {name}", False)]
+        if five is not None and reset > now:
+            out += [(level(five), f"{five:.0f}%", False), ("2", clock(reset) if short else f"resets {clock(reset)}", False)]
+        elif five is not None:  # the 5-hour window has reset since
+            out.append(("32", "0%", False))
+        if week is not None:
+            out.append((level(week), f"w{week:.0f}%" if short else f"week {week:.0f}%", False))
+        if nxt:
+            out.append(("31" if better else "2", f"→ {nxt}" if short else f"better now: {nxt}" if better else f"next: {nxt}", False))
+            if n5:
+                out.append((level(n5), f"{n5:.0f}%", True))  # right after the account's name, no dot
+            if better and not short:
+                out.append(("31", "/pool:switch", False))
+        else:
+            out.append(("31", ("⚠ none" if short else "⚠ no next account") + (f" until {clock(min(resets))}" if resets else ""), False))
+        return out
+
+    width = terminal_width() - 4  # claude indents the line and keeps a margin on the right
+    for short in (False, True):
+        joined = []
+        for c, t, glued in pieces(short):
+            if joined:
+                joined.append((" " if glued else " · ", None))
+            joined.append((t, c))
+        plain = "".join(t for t, _ in joined)
+        if len(plain) <= width or width <= 0:
+            break
+    pad = " " * max(0, width - len(plain))
     if not color:
         return pad + plain
     return "\033[0m" + pad + "".join(f"\033[2m{t}\033[0m" if c is None else f"\033[{c}m{t}\033[0m" for t, c in joined)
@@ -1815,6 +1880,16 @@ def status(here=None, color=None):
     paint = lambda t, c: f"\033[{c}m{t}\033[0m" if color and c and t.strip() else t  # noqa: E731
     for x in rows:
         print("  ".join(paint(t.ljust(w), c) for (t, c), w in zip(x, widths)) + "  " + paint(*x[-1]))
+    # Two accounts whose 5-hour windows reset at the same second are likely one account in the pool twice.
+    grouped = {n for g in same_groups() for n in g}
+    resets = {}
+    for n in pool:
+        t = (usage.get(n) or {}).get("resets_ts") or 0
+        if t > now and n not in grouped:
+            resets.setdefault(t, []).append(n)
+    for names in (v for v in resets.values() if len(v) > 1):
+        print("\n" + paint(f"{' and '.join(names)} may be one account (same 5-hour reset). If so: "
+                           f"claude-pool --pool-same {' '.join(names)}", "33"))
     est = [weekly[n] for n in pool if weekly[n][3]]
     if est:
         print("\n" + paint("Estimates from usage, not Anthropic's numbers. pace: week room left over week time left "
@@ -2042,6 +2117,8 @@ def main(argv=None):
             sys.exit("claude-pool: --pool-watch takes the minutes between checks, e.g. --pool-watch 10")
     if cmd == "--pool-check":
         return check()
+    if cmd == "--pool-same":
+        return same(rest)
     if cmd == "--pool-capacity":
         try:
             r = float(rest[0])

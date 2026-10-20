@@ -7,6 +7,7 @@ Anything that isn't a `--pool-*` command goes to `claude` unchanged.
 | Command | What it does |
 |---|---|
 | `claude-pool --pool-status` | Every account with its usage and when it resets, numbered in the order the pool uses them (1 = next), with its weekly pace, learned `r` and 5-hour windows left (see [How it works](how-it-works.md#weekly-pace)) |
+| `claude-pool --pool-same <a> <b>..` | These accounts are one Anthropic account (a token and the same login in Orca): they share their usage numbers from now on. With no names, lists the groups. `--pool-status` suggests it when two accounts' 5-hour windows reset at the same second |
 | `claude-pool --pool-capacity <r>` | What 1, 2, 3, 4, 5, 6, 10 and 100 identical accounts would hold if one full 5-hour window took `r`% of a week. Hypothetical: the pool's own estimates are in `--pool-status` |
 | `claude-pool --pool-watch [minutes]` | The same table, checked again every 5 minutes (or the minutes given) until Ctrl+C |
 | `claude-pool --pool-refresh [name..]` | Check the usage of every account (or the named ones) now |

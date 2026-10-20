@@ -646,6 +646,42 @@ class PoolTest(unittest.TestCase):
         r = self.run_pool("--pool-statusline", folder, stdin="{}", NO_COLOR="1")
         self.assertTrue(r.stdout.endswith("next: b 30%\n"), r.stdout)
 
+    def test_statusline_is_shorter_on_a_narrow_terminal(self):
+        now = time.time()
+        folder = self.banner_folder("orca-editors", {"orca-editors": "/s", "factory": "/s"})
+        self.usage({"orca-editors": {"five_hour": 6, "resets_ts": now + 3 * 3600, "seven_day": 40, "seven_day_resets_ts": now + 90000},
+                    "factory": {"five_hour": 27, "resets_ts": now + 3600, "seven_day": 10, "seven_day_resets_ts": now + 3600}})
+        at = time.strftime("%H:%M", time.localtime(now + 3 * 3600))
+        wide = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="200", NO_COLOR="1").stdout.strip()
+        self.assertEqual(wide, f"pool: orca-editors · 6% · resets {at} · week 40% · better now: factory 27% · /pool:switch")
+        narrow = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="60", NO_COLOR="1").stdout.rstrip("\n")
+        self.assertEqual(narrow.strip(), f"orca-editors · 6% · {at} · w40% · → factory 27%")
+        self.assertEqual(len(narrow), 56)  # still right-aligned
+        r = self.run_pool("--pool-statusline", folder, stdin="{}", COLUMNS="60")
+        self.assertIn("\033[31m→ factory\033[0m", r.stdout)  # still red when it's the better one
+
+    def test_same_account_twice_shares_its_numbers(self):
+        now = time.time()
+        self.add("factory", "tok-f")
+        self.add("orca-factory", "tok-of")
+        self.add("other", "tok-o")
+        self.usage({"factory": {"five_hour": 27, "resets_ts": now + 3600, "checked_ts": now - 60},
+                    "orca-factory": {"five_hour": 8, "resets_ts": now + 3600, "checked_ts": now - 2400},
+                    "other": {"five_hour": 3, "resets_ts": now + 7200, "checked_ts": now}})
+        out = self.run_pool("--pool-status").stdout
+        self.assertIn("factory and orca-factory may be one account", out)
+        self.assertIn("claude-pool --pool-same factory orca-factory", out)
+        r = self.run_pool("--pool-same", "factory", "orca-factory")
+        self.assertIn("factory and orca-factory are one account", r.stdout)
+        rows = self.read_usage()
+        self.assertEqual(rows["orca-factory"]["five_hour"], 27)  # the newer numbers win
+        self.assertEqual(rows["other"]["five_hour"], 3)
+        self.run_pool("-p", "hi", CLAUDE_POOL_ACCOUNT="orca-factory", FAKE_UTIL="0.4")  # a run on one updates both
+        rows = self.read_usage()
+        self.assertEqual((rows["factory"]["five_hour"], rows["orca-factory"]["five_hour"]), (40.0, 40.0))
+        self.assertEqual(self.run_pool("--pool-same").stdout, "factory orca-factory\n")
+        self.assertNotIn("may be one account", self.run_pool("--pool-status").stdout)
+
     def test_statusline_never_takes_usage_back(self):
         # Another session saved 9% for this window; this idle session still holds its 5% from earlier.
         now = int(time.time())
