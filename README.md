@@ -19,6 +19,7 @@ claude-pool -p "fix the tests"    # print mode, like `claude -p`
   pool: editors2 · 95% · resets 23:10 · ⚠ no next account until 20:20
   ```
 
+- **Or switch when you want.** Type `/pool:switch work` in the session to move it to `work`, or just `/pool:switch` to move it to the best free account. Same conversation, no model call for the command.
 - **Print mode reruns.** A `-p` run cut off by a limit is rerun on the next account, if it hadn't used tools yet.
 - **It picks well.** The account whose week resets soonest goes first, since leftover usage is lost at the reset. It moves on at 90% of the 5-hour limit.
 - **It's safe to install first.** With no accounts set up it just runs `claude` on your normal login.

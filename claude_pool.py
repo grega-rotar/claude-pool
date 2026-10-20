@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.12.1"
+__version__ = "0.13.0"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -68,6 +68,8 @@ Commands:
   --pool-off <name>        take an account out (renames it to .off)
   --pool-on <name>         put it back
   --pool-log [N]           the last N events (default 20): runs, switches, errors
+  --pool-switch [name]     inside a session (a `!` command or claude's Bash): move it to the named account, or
+                           the best free one; typing /pool:switch [name] in the session does the same
   --pool-version           version
 
 Settings (environment variables or CLAUDE_POOL_* lines in a .env file, all optional):
@@ -991,10 +993,11 @@ def self_cmd(*args):
     return cmd.replace("\\", "/") if WINDOWS else cmd  # claude runs them in Git Bash there: forward slashes
 
 
-def with_hook(args, spec, settings_path, hook_file, banner_dir=None):
-    """The args with our StopFailure hook added through --settings, merged into the caller's own --settings. With
-    `banner_dir`, the status line becomes ours too: it runs the one it replaces first (saved in that folder)."""
-    hook_cmd = self_cmd("--pool-hook", hook_file)
+def with_hook(args, spec, folder, banner=True):
+    """The args with our StopFailure and UserPromptSubmit hooks added through --settings, merged into the caller's
+    own --settings, and the /pool:switch command as a plugin when claude takes --plugin-dir. With `banner`, the status
+    line becomes ours too: it runs the one it replaces first (saved in `folder`)."""
+    hook_cmd = self_cmd("--pool-hook", os.path.join(folder, "stop-failure.json"))
     settings, out = {}, []
     for f, values in split_args(args, spec):
         if f and f.split("=", 1)[0] == "--settings":
@@ -1011,14 +1014,26 @@ def with_hook(args, spec, settings_path, hook_file, banner_dir=None):
         out += ([f] if f else []) + values
     hooks = settings.setdefault("hooks", {})
     hooks["StopFailure"] = list(hooks.get("StopFailure") or []) + [{"hooks": [{"type": "command", "command": hook_cmd}]}]
-    if banner_dir:
+    hooks["UserPromptSubmit"] = list(hooks.get("UserPromptSubmit") or []) + [{"hooks": [
+        {"type": "command", "command": self_cmd("--pool-prompt", folder), "timeout": 120}]}]
+    if banner:
         if (settings.get("statusLine") or {}).get("command"):
-            with open(os.path.join(banner_dir, "statusline.json"), "w", encoding="utf-8") as fh:
+            with open(os.path.join(folder, "statusline.json"), "w", encoding="utf-8") as fh:
                 json.dump(settings["statusLine"], fh)
-        settings["statusLine"] = {"type": "command", "command": self_cmd("--pool-statusline", banner_dir)}
+        settings["statusLine"] = {"type": "command", "command": self_cmd("--pool-statusline", folder)}
+    settings_path = os.path.join(folder, "settings.json")
     with open(settings_path, "w", encoding="utf-8") as fh:
         json.dump(settings, fh)
-    return ["--settings", settings_path] + out, settings
+    plugin = []
+    if "--plugin-dir" in spec["flags"]:
+        plugin = ["--plugin-dir", os.path.join(folder, "plugin")]
+        os.makedirs(os.path.join(plugin[1], ".claude-plugin"))
+        os.makedirs(os.path.join(plugin[1], "commands"))
+        write_json(os.path.join(plugin[1], ".claude-plugin", "plugin.json"),
+                   {"name": "pool", "description": "claude-pool: move this session to another account"})
+        with open(os.path.join(plugin[1], "commands", "switch.md"), "w", encoding="utf-8") as fh:
+            fh.write(POOL_COMMAND_MD)
+    return ["--settings", settings_path] + plugin + out, settings
 
 
 def outer_statusline(folder, data, raw):
@@ -1256,6 +1271,95 @@ def next_free(pool, name):
         skip.add(nxt)
 
 
+def asked_account(pool, name, want):
+    """The account `/pool:switch [want]` moves a session on `name` to, or (None, why not). With no name it's the same pick
+    as at a limit; a named one must see the same conversations and have room, rechecked as next_free does."""
+    if not want:
+        nxt = next_free(pool, name)
+        return (nxt, None) if nxt else (None, "no other account is free right now")
+    if want not in pool:
+        return None, f"no account {want}; the pool has " + ", ".join(sorted(pool))
+    if want == name:
+        return None, f"this session already runs on {want}"
+    if sessions_dir(*pool[want]) != sessions_dir(*pool[name]):
+        return None, f"{want} can't see this conversation (its claude folder doesn't share projects/)"
+    if pool[want][0] != "key":
+        if time.time() - ((load_usage().get(want) or {}).get("checked_ts") or 0) > 60:
+            refresh({want: pool[want]}, names=[want])
+        row = load_usage().get(want) or {}
+        if broken(row):
+            return None, f"{want} was refused: " + str(row.get("error") or "token refused")[:200]
+        reset = at_limit(row)
+        if reset:
+            return None, f"{want} is full until {datetime.fromtimestamp(reset):%H:%M}"
+    return want, None
+
+
+# `/pool:switch [account]` in a session (or `claude-pool --pool-switch [account]` from its shell) hands a switch
+# to the session's claude-pool through its temp folder and waits for the answer, which claude shows the user.
+POOL_COMMAND = re.compile(r"/pool:switch(?:\s+(\S+))?\s*$")
+POOL_COMMAND_MD = """---
+description: Move this session to another claude-pool account (the best free one, or the one named)
+argument-hint: [account]
+---
+Tell the user in one line: /pool:switch only works in a claude-pool session that runs hooks, so nothing was switched.
+"""
+
+
+def write_json(path, data):
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    replace(path + ".tmp", path)
+
+
+def ask_switch(folder, to, session):
+    """(moved, message) from the session's claude-pool for a switch to `to` (None: the best free account)."""
+    reply = os.path.join(folder, f"reply-{os.getpid()}.json")
+    write_json(os.path.join(folder, "switch.json"), {**session, "to": to, "reply": reply})
+    deadline = time.time() + 110  # a switch may first check a few accounts' usage
+    while time.time() < deadline:
+        answer = read_failure(reply) if os.path.exists(reply) else None
+        if answer:
+            return answer.get("ok"), answer.get("message")
+        time.sleep(0.1)
+    return False, "claude-pool: this session's claude-pool didn't answer; nothing was switched"
+
+
+def prompt_hook(folder):
+    """--pool-prompt <folder>: claude's UserPromptSubmit hook. Notes the session for --pool-switch, and turns
+    `/pool:switch [account]` into a switch; that prompt never reaches the model."""
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    session = {"session_id": data.get("session_id"), "cwd": data.get("cwd")}
+    if not session["session_id"]:
+        return 0
+    try:
+        write_json(os.path.join(folder, "current.json"), session)
+    except OSError:
+        pass
+    m = POOL_COMMAND.match((data.get("prompt") or "").strip())
+    if m:
+        print(json.dumps({"decision": "block", "reason": ask_switch(folder, m.group(1), session)[1]}))
+    return 0
+
+
+def switch(want):
+    """--pool-switch [account]: move the claude-pool session this runs in, from a `!` command or claude's Bash."""
+    folder = os.environ.get("CLAUDE_POOL_SESSION")
+    if not folder or not os.path.isdir(folder):
+        sys.exit("claude-pool: --pool-switch only works inside a claude-pool session (or type /pool:switch there)")
+    try:
+        with open(os.path.join(folder, "current.json"), encoding="utf-8") as f:
+            session = json.load(f)
+    except (OSError, ValueError):
+        sys.exit("claude-pool: send this session a message first, then switch")
+    ok, message = ask_switch(folder, want, session)
+    print(message, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def stop(p):
     if p.poll() is None:
         p.terminate()  # claude saves the conversation and puts the terminal back on SIGTERM
@@ -1268,11 +1372,12 @@ def stop(p):
 
 def interactive(args, pool, name, binary, spec):
     """Run an interactive claude on `name`, and move the session to the next account each time a usage limit
-    stops it. Returns claude's exit code."""
+    stops it, or when you ask with /pool:switch. Returns claude's exit code."""
     tmp = tempfile.mkdtemp(prefix="claude-pool-")
     hook_file = os.path.join(tmp, "stop-failure.json")
+    switch_file = os.path.join(tmp, "switch.json")
     banner = os.environ.get("CLAUDE_POOL_BANNER", "on") != "off"
-    args, settings = with_hook(args, spec, os.path.join(tmp, "settings.json"), hook_file, tmp if banner else None)
+    args, settings = with_hook(args, spec, tmp, banner)
     shares = {n: {"kind": k, "sessions": sessions_dir(k, v)} for n, (k, v) in pool.items()}
     if settings.get("disableAllHooks"):
         print("claude-pool: your --settings turn hooks off; this session can't switch accounts", file=sys.stderr)
@@ -1300,7 +1405,8 @@ def interactive(args, pool, name, binary, spec):
                 with open(os.path.join(tmp, "session.json.tmp"), "w", encoding="utf-8") as fh:
                     json.dump({"account": name, "pool": shares}, fh)
                 replace(os.path.join(tmp, "session.json.tmp"), os.path.join(tmp, "session.json"))
-            p = subprocess.Popen([binary] + args, env=account_env(*pool[name]), cwd=cwd)
+            # CLAUDE_POOL_SESSION: where `claude-pool --pool-switch`, run from inside the session, finds us
+            p = subprocess.Popen([binary] + args, env={**account_env(*pool[name]), "CLAUDE_POOL_SESSION": tmp}, cwd=cwd)
             nxt = None
             while p.poll() is None:
                 try:
@@ -1308,22 +1414,34 @@ def interactive(args, pool, name, binary, spec):
                 except subprocess.TimeoutExpired:
                     pass
                 failure = read_failure(hook_file) if os.path.exists(hook_file) else None
-                if not failure or not failure.get("session_id") or stopping:
-                    continue
-                why = "was refused" if refused_failure(name, failure) else "hit its usage limit" if usage_limited(
-                    name, pool, failure) else None
-                if not why:
-                    continue
-                nxt = next_free(pool, name)
-                if not nxt and why == "was refused":
-                    log("switch_failed", account=name, message=f"{name} was refused and no other account is free")
-                    continue
-                if not nxt:  # claude waits for the reset and goes on by itself
-                    resets = [r for r in (at_limit(load_usage().get(n) or {}) for n in pool) if r]
-                    when = datetime.fromtimestamp(min(resets), timezone.utc).isoformat() if resets else "unknown"
-                    log("exhausted", account=name, resets_at=when,
-                        message=f"every account is at its usage limit (first reset {when}); the session waits")
-                    continue
+                asked = read_failure(switch_file) if os.path.exists(switch_file) else None
+                if asked and asked.get("session_id") and not stopping:
+                    nxt, why_not = asked_account(pool, name, asked.get("to"))
+                    try:
+                        write_json(asked["reply"], {"ok": bool(nxt), "message": "claude-pool: " + (
+                            f"moving this session to {nxt}; it restarts in a moment" if nxt else why_not)})
+                    except (OSError, KeyError, TypeError):
+                        pass
+                    if not nxt:
+                        continue
+                    failure, why = asked, "was left as you asked"
+                else:
+                    if not failure or not failure.get("session_id") or stopping:
+                        continue
+                    why = "was refused" if refused_failure(name, failure) else "hit its usage limit" if usage_limited(
+                        name, pool, failure) else None
+                    if not why:
+                        continue
+                    nxt = next_free(pool, name)
+                    if not nxt and why == "was refused":
+                        log("switch_failed", account=name, message=f"{name} was refused and no other account is free")
+                        continue
+                    if not nxt:  # claude waits for the reset and goes on by itself
+                        resets = [r for r in (at_limit(load_usage().get(n) or {}) for n in pool) if r]
+                        when = datetime.fromtimestamp(min(resets), timezone.utc).isoformat() if resets else "unknown"
+                        log("exhausted", account=name, resets_at=when,
+                            message=f"every account is at its usage limit (first reset {when}); the session waits")
+                        continue
                 time.sleep(1)  # the hook runs as the turn ends: give claude a moment to finish writing it
                 if p.poll() is not None or stopping:  # you quit meanwhile: don't start it again
                     nxt = None
@@ -1335,11 +1453,12 @@ def interactive(args, pool, name, binary, spec):
                 return p.returncode if p.returncode >= 0 else 128 - p.returncode  # killed by a signal: as a shell says
             if tty:
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty)
-            log("switch", account=name, to=nxt, session=failure["session_id"], reason=failure.get("error"))
+            log("switch", account=name, to=nxt, session=failure["session_id"], reason=failure.get("error") or "asked")
             print(f"\nclaude-pool: {name} {why}; going on with {nxt}", file=sys.stderr, flush=True)
             switches += 1
             cwd = failure.get("cwd") or cwd  # with --worktree the session lives in the worktree
-            args = resume_args(args, spec, failure["session_id"], prompt)
+            # Asked for: no nudge, the session waits for you.
+            args = resume_args(args, spec, failure["session_id"], None if failure is asked else prompt)
             name = nxt
     finally:
         for s, h in old.items():
@@ -1560,6 +1679,10 @@ def main(argv=None):
         return hook(rest[0]) if rest else 1
     if cmd == "--pool-statusline":
         return statusline(rest[0]) if rest else 0
+    if cmd == "--pool-prompt":  # runs on every prompt: before the .env and account reads
+        return prompt_hook(rest[0]) if rest else 0
+    if cmd == "--pool-switch":
+        return switch(rest[0] if rest else None)
     load_dotenv()
     if cmd == "--pool-help":
         print(HELP.format(version=__version__, dir=pool_dir(), state=state_path(), log=log_path()))

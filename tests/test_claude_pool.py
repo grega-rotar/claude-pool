@@ -22,7 +22,8 @@ args = sys.argv[1:]
 if args == ["--help"]:
     print("Usage: claude [options] [command] [prompt]\n\nOptions:\n  --model <model>  Model\n  --add-dir <directories...>  Dirs\n"
           "  -r, --resume [value]  Resume\n  -c, --continue  Continue\n  --settings <file-or-json>  Settings\n"
-          "  -w, --worktree [name]  Worktree\n  -v, --version  Version\n\nCommands:\n  mcp  MCP\n  update|upgrade  Update")
+          "  -w, --worktree [name]  Worktree\n  --plugin-dir <path>  Plugin\n  -v, --version  Version\n\n"
+          "Commands:\n  mcp  MCP\n  update|upgrade  Update")
     sys.exit(0)
 tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ("key:" + os.environ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else "login")
 cfg = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -49,6 +50,21 @@ if "-p" not in args:
             for h in entry["hooks"]:
                 subprocess.run(shlex.split(h["command"]), input=json.dumps(payload), text=True)
         time.sleep(float(os.environ.get("FAKE_WAIT", "15")))  # a session at the limit waits for the reset
+    if settings and "--resume" not in args and (os.environ.get("FAKE_PROMPT") or os.environ.get("FAKE_BANG")):
+        # You type FAKE_PROMPT (the UserPromptSubmit hook sees it), then maybe run `! claude-pool --pool-switch FAKE_BANG`.
+        payload = {"session_id": "sess-1", "hook_event_name": "UserPromptSubmit", "cwd": os.getcwd(),
+                   "prompt": os.environ.get("FAKE_PROMPT") or "hi"}
+        out = ""
+        for entry in settings["hooks"]["UserPromptSubmit"]:
+            for h in entry["hooks"]:
+                out += subprocess.run(shlex.split(h["command"]), input=json.dumps(payload), text=True, capture_output=True).stdout
+        if os.environ.get("FAKE_BANG"):
+            r = subprocess.run([sys.executable, os.environ["FAKE_POOL"], "--pool-switch", os.environ["FAKE_BANG"]],
+                               capture_output=True, text=True)
+            out += r.stdout + r.stderr
+        with open(os.path.join(os.environ["FAKE_LOG"], "hook-out.txt"), "w") as f:
+            f.write(out)
+        time.sleep(float(os.environ.get("FAKE_WAIT", "15")))
     print("session done on " + tok)
     sys.exit(0)
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
@@ -324,12 +340,12 @@ class PoolTest(unittest.TestCase):
         self.assertIn("a hit its usage limit; going on with b", r.stderr)
         first, second = self.sessions()
         self.assertEqual(first["token"], "limit-a")
-        self.assertEqual(first["args"][2:], ["fix the bug", "--model", "haiku", "--add-dir", "x", "y", "-c"])
+        self.assertEqual(first["args"][4:], ["fix the bug", "--model", "haiku", "--add-dir", "x", "y", "-c"])
         self.assertEqual(second["token"], "tok-b")
         # The caller's flags again (a resume doesn't keep them), not the prompt or -c, then the session and a nudge.
-        self.assertEqual(second["args"][2:], ["--model", "haiku", "--add-dir", "x", "y", "--resume", "sess-1",
+        self.assertEqual(second["args"][4:], ["--model", "haiku", "--add-dir", "x", "y", "--resume", "sess-1",
                                               "Continue where you left off. Your last turn was cut off by a usage limit."])
-        self.assertEqual(second["args"][:2], first["args"][:2])  # the same --settings with the hook
+        self.assertEqual(second["args"][:4], first["args"][:4])  # the same --settings with the hooks, and the plugin
         self.assertEqual(self.read_usage()["a"]["status"], "rejected")  # checked, so every caller sees it
         events = [e["event"] for e in self.events()]
         self.assertIn("switch", events)
@@ -355,7 +371,7 @@ class PoolTest(unittest.TestCase):
         self.run_pool("hi", CLAUDE_POOL_RESUME_PROMPT="go on")
         a, b, c = self.sessions()
         self.assertEqual([x["token"] for x in (a, b, c)], ["limit-a", "limit-b", "tok-c"])
-        self.assertEqual(c["args"][2:], ["--resume", "sess-1", "go on"])
+        self.assertEqual(c["args"][4:], ["--resume", "sess-1", "go on"])
 
     def test_switch_rechecks_the_next_account_first(self):
         # b's saved numbers are old and say it has room, but it is full: the recheck skips it.
@@ -368,6 +384,66 @@ class PoolTest(unittest.TestCase):
         self.assertIn("a hit its usage limit; going on with c", r.stderr)
         self.assertEqual([x["token"] for x in self.sessions()], ["limit-a", "tok-c"])
         self.assertIn("limit-b", [c["token"] for c in self.probes()])
+
+    # --- /pool and --pool-switch: a switch you ask for ------------------------------------------------------
+    def asked(self, **env):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.add("c", "tok-c")
+        soon = time.time() + 3600
+        self.usage({"a": {"seven_day": 50, "seven_day_resets_ts": soon},
+                    "b": {"seven_day": 10, "seven_day_resets_ts": soon + 7200, "checked_ts": time.time()},
+                    "c": {"status": "rejected", "resets_ts": soon, "checked_ts": time.time()}})
+        r = self.run_pool("fix it", "--model", "haiku", FAKE_POOL=POOL, **env)
+        with open(os.path.join(self.log, "hook-out.txt")) as f:
+            return r, f.read()
+
+    def test_pool_command_moves_the_session_without_a_nudge(self):
+        r, out = self.asked(FAKE_PROMPT="/pool:switch b")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(out), {"decision": "block",  # the prompt never reaches the model
+                                           "reason": "claude-pool: moving this session to b; it restarts in a moment"})
+        first, second = self.sessions()
+        self.assertEqual((first["token"], second["token"]), ("tok-a", "tok-b"))
+        self.assertEqual(second["args"][4:], ["--model", "haiku", "--resume", "sess-1"])
+        self.assertIn({"event": "switch", "reason": "asked"},
+                      [{k: e.get(k) for k in ("event", "reason")} for e in self.events()])
+        self.assertIn("a was left as you asked; going on with b", r.stderr)
+
+    def test_pool_command_is_a_plugin_and_a_prompt_hook(self):
+        self.asked(FAKE_PROMPT="/pool:switch b")
+        args = self.sessions()[0]["args"]
+        self.assertEqual(args[2], "--plugin-dir")
+        self.assertIn("--pool-prompt", self.sessions()[0]["settings"]["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
+
+    def test_pool_command_without_a_name_takes_the_best_free_account(self):
+        r, out = self.asked(FAKE_PROMPT="/pool:switch")
+        self.assertIn("moving this session to b", out)
+        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a", "tok-b"])
+
+    def test_pool_command_refuses_a_full_or_unknown_account(self):
+        for want, why in (("c", "c is full until"), ("zzz", "no account zzz; the pool has a, b, c"),
+                          ("a", "already runs on a")):
+            shutil.rmtree(self.log, ignore_errors=True)
+            r, out = self.asked(FAKE_PROMPT="/pool:switch " + want, FAKE_WAIT="1")
+            self.assertEqual(json.loads(out)["decision"], "block")
+            self.assertIn(why, json.loads(out)["reason"])
+            self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"], want)
+
+    def test_other_prompts_pass_through(self):
+        r, out = self.asked(FAKE_PROMPT="/pool:switches and /pool:switch b", FAKE_WAIT="1")
+        self.assertEqual(out, "")
+        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])
+
+    def test_pool_switch_from_the_sessions_shell(self):
+        r, out = self.asked(FAKE_BANG="b")
+        self.assertEqual(out.strip(), "claude-pool: moving this session to b; it restarts in a moment")
+        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a", "tok-b"])
+
+    def test_pool_switch_outside_a_session_fails(self):
+        r = self.run_pool("--pool-switch", "b")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("only works inside a claude-pool session", r.stderr)
 
     # --- Orca ---------------------------------------------------------------------------------------------
 
@@ -411,7 +487,7 @@ class PoolTest(unittest.TestCase):
         first, second = self.sessions()
         self.assertEqual((first["token"], first["config_dir"]), ("limit-2", self.home_of(root, "p2")))
         self.assertEqual((second["token"], second["config_dir"]), ("tok-1", self.home_of(root, "p1")))
-        self.assertEqual(second["args"][2:], ["--model", "haiku", "--resume", "sess-1",
+        self.assertEqual(second["args"][4:], ["--model", "haiku", "--resume", "sess-1",
                                               "Continue where you left off. Your last turn was cut off by a usage limit."])
 
     def test_orca_and_tokens_mix_when_they_share_the_conversations(self):
@@ -564,7 +640,7 @@ class PoolTest(unittest.TestCase):
         os.makedirs(wt)
         self.run_pool("-w", "feat", "hi", FAKE_SESSION_CWD=wt)
         first, second = self.sessions()
-        self.assertEqual(second["args"][2:4], ["--resume", "sess-1"])  # -w feat is not run again
+        self.assertEqual(second["args"][4:6], ["--resume", "sess-1"])  # -w feat is not run again
         self.assertNotIn("-w", second["args"])
         self.assertEqual(os.path.realpath(second["cwd"]), os.path.realpath(wt))
 

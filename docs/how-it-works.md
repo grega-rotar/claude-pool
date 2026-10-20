@@ -40,6 +40,15 @@ Ctrl+C goes to claude, not claude-pool. Closing the terminal or a `kill` reaches
 - Switching needs hooks. It does nothing under `--bare`, `--safe-mode`, `disableAllHooks`, or a managed policy that allows only managed hooks. Those sessions run normally on one account.
 - To keep a session on one account, set `CLAUDE_POOL_ACCOUNT=work`. To keep picking but never switch, set `CLAUDE_POOL_SWITCH=off`.
 
+### Switching by hand
+
+Type `/pool:switch work` in the session to move it to `work`. Type `/pool:switch` with no name to move it to the account a limit would pick. Typing `/pool` brings it up in the command list.
+
+- claude-pool loads the command as a small plugin (`--plugin-dir`) and catches it in a `UserPromptSubmit` hook, so the prompt never reaches the model and costs nothing. The answer shows up as the hook's message.
+- The account must see the same conversation and have room. Its usage is rechecked first, unless it was checked in the last minute. A full, refused or unknown account is turned down with the reason, and the session stays where it is.
+- The session restarts with `--resume <id>` as at a limit, but without the "Continue" nudge: it waits for you.
+- From the session's shell, `! claude-pool --pool-switch [name]` does the same. So does asking Claude to run it. It needs one message sent in the session first, so it knows the session id.
+
 ### The status line
 
 Each claude-pool session gets one line under the prompt, in the bottom-right corner:
