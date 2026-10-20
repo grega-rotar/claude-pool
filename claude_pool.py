@@ -44,7 +44,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 PROBE_TIMEOUT = 15  # seconds for one usage check
@@ -1295,6 +1295,13 @@ def asked_account(pool, name, want):
     """The account `/pool:switch [want]` moves a session on `name` to, or (None, why not). With no name it's the same pick
     as at a limit; a named one must see the same conversations and have room, rechecked as next_free does."""
     if not want:
+        # Already on the account the pool would pick now: stay. This session's own run mark doesn't count, or it
+        # would look busy to itself.
+        usage, here = load_usage(), sessions_dir(*pool[name])
+        own = usage.setdefault(name, {})
+        own["running"] = [r for r in own.get("running") or [] if not (r.get("pid") == os.getpid() and r.get("host") == HOST)]
+        if choose({n: v for n, v in pool.items() if sessions_dir(*v) == here}, usage) == name:
+            return None, f"{name} is already the best account; staying on it"
         nxt = next_free(pool, name)
         return (nxt, None) if nxt else (None, "no other account is free right now")
     if want not in pool:

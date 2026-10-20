@@ -52,6 +52,12 @@ if "-p" not in args:
         time.sleep(float(os.environ.get("FAKE_WAIT", "15")))  # a session at the limit waits for the reset
     if settings and "--resume" not in args and (os.environ.get("FAKE_PROMPT") or os.environ.get("FAKE_BANG")):
         # You type FAKE_PROMPT (the UserPromptSubmit hook sees it), then maybe run `! claude-pool --pool-switch FAKE_BANG`.
+        if os.environ.get("FAKE_USAGE_A"):  # account a's usage moved on meanwhile
+            with open(os.environ["CLAUDE_POOL_STATE"]) as f:
+                state = json.load(f)
+            state["a"].update(json.loads(os.environ["FAKE_USAGE_A"]))
+            with open(os.environ["CLAUDE_POOL_STATE"], "w") as f:
+                json.dump(state, f)
         payload = {"session_id": "sess-1", "hook_event_name": "UserPromptSubmit", "cwd": os.getcwd(),
                    "prompt": os.environ.get("FAKE_PROMPT") or "hi"}
         out = ""
@@ -416,8 +422,15 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(args[2], "--plugin-dir")
         self.assertIn("--pool-prompt", self.sessions()[0]["settings"]["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
 
+    def test_pool_command_without_a_name_stays_on_the_best_account(self):
+        r, out = self.asked(FAKE_PROMPT="/pool:switch", FAKE_WAIT="1")
+        self.assertIn("a is already the best account; staying on it", out)
+        self.assertEqual([c["token"] for c in self.sessions()], ["tok-a"])
+
     def test_pool_command_without_a_name_takes_the_best_free_account(self):
-        r, out = self.asked(FAKE_PROMPT="/pool:switch")
+        # Since the session started, a went past the 90% margin: b is the pool's pick now.
+        later = {"five_hour": 95, "resets_ts": time.time() + 3600, "checked_ts": time.time()}
+        r, out = self.asked(FAKE_PROMPT="/pool:switch", FAKE_USAGE_A=json.dumps(later))
         self.assertIn("moving this session to b", out)
         self.assertEqual([c["token"] for c in self.sessions()], ["tok-a", "tok-b"])
 

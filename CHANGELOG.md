@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.1
+
+- **`/pool:switch` stays on the best account:** with no name, a session already on the account the pool would pick now stays there ("already the best account"), instead of moving to the next one.
+
 ## 0.13.0
 
 - **Switch by hand:** type `/pool:switch [account]` in an interactive session to move it to that account, or with no name to the best free one. It's the same restart as at a usage limit (`--resume`, same flags and folder), without the "Continue" nudge. The prompt is caught by a `UserPromptSubmit` hook and never reaches the model. A full, refused, unknown or unshared account is turned down with the reason. `! claude-pool --pool-switch [account]` does the same from the session's shell. Needs a claude with `--plugin-dir` for the command; the `--pool-switch` route works without it.
