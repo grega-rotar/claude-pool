@@ -21,7 +21,7 @@ claude-pool -p "fix the tests"    # print mode, like `claude -p`
 
 - **Or switch when you want.** Type `/pool:switch work` in the session to move it to `work`, or just `/pool:switch` to move it to the best free account. Same conversation, no model call for the command. `/pool:status` shows every account's usage right there, and `/pool:log` the last events.
 - **Print mode reruns.** A `-p` run cut off by a limit is rerun on the next account, if it hadn't used tools yet.
-- **It picks well.** The account whose week resets soonest goes first, since leftover usage is lost at the reset. It moves on at 90% of the 5-hour limit.
+- **It picks well.** It spends weekly usage that would be lost at the reset anyway, and otherwise keeps every account's week going until its reset, so no account runs dry while another still has plenty. It learns how much of a week each account's 5-hour window uses. It moves on at 90% of the 5-hour limit.
 - **It's safe to install first.** With no accounts set up it just runs `claude` on your normal login.
 
 ## Install

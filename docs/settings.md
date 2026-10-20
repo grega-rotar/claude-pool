@@ -10,7 +10,10 @@ All optional. Set them as environment variables or as lines in a `.env`.
 | `CLAUDE_POOL_ENV_FILE` | nearest `.env` going up | `.env` to read |
 | `CLAUDE_POOL_BINARY` | `claude` | The real claude |
 | `CLAUDE_POOL_ACCOUNT` | | Always use this account |
-| `CLAUDE_POOL_STRATEGY` | `drain` | `balance` = least used first |
+| `CLAUDE_POOL_STRATEGY` | `pace` | `drain` = soonest weekly reset first, `balance` = least used first |
+| `CLAUDE_POOL_WINDOW_WEEK` | learned | `r` for every account: the weekly % points one full 5-hour window uses, e.g. `20` = 5 full windows a week |
+| `CLAUDE_POOL_PACE_MARGIN` | `0.25` | Safety margin on a learned `r`: `0.25` counts it 25% higher, twice that while little is learned |
+| `CLAUDE_POOL_SERVER_ID` | host name | This server's name, so servers sharing accounts break ties differently |
 | `CLAUDE_POOL_SWITCH_AT` | `90` | 5-hour or 7-day % to move on |
 | `CLAUDE_POOL_SPREAD_AT` | `75` | 5-hour % after which a busy account gets no second run |
 | `CLAUDE_POOL_FRESH` | `300` | Seconds between usage checks, `0` = off |
