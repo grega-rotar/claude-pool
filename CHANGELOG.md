@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.2
+
+- **Usage checks on a busy server:** `CLAUDE_POOL_PROBE_TIMEOUT` sets the seconds one check may take (15), and `CLAUDE_POOL_PROBES` how many run at once (all). On a 2-CPU server with seven accounts every check ran past 15 s, so the pool picked blind.
+
 ## 0.16.1
 
 - **"better now" in the status line:** when the pool would pick another account than the session's own now, the status line says so in red, `better now: factory 27% · /pool:switch`, instead of `next: factory 27%`. A session only moves by itself at its limit, so an older one could sit on an account the pool no longer prefers without showing it.
