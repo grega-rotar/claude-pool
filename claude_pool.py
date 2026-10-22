@@ -47,10 +47,9 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.16.1"
+__version__ = "0.16.2"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
-PROBE_TIMEOUT = 15  # seconds for one usage check
 RUN_MAX_AGE = 6 * 3600  # a "running" mark older than this is dropped even if its pid can't be checked
 ALERT_EVENTS = {"exhausted", "token_broken", "cli_changed", "cut_off_not_rerun"}
 ALERT_EVERY = 3600  # the same alert (event + account) at most once an hour
@@ -721,6 +720,11 @@ def fresh_secs():
     return env_num("CLAUDE_POOL_FRESH", 300)
 
 
+def probe_timeout():
+    """Seconds for one usage check; a busy small server needs more than the default."""
+    return env_num("CLAUDE_POOL_PROBE_TIMEOUT", 15)
+
+
 def broken(row, now=None, fresh=None):
     """The account's token was refused at its last check: skip it until rechecked."""
     return bool(row.get("error_ts")) and (now or time.time()) - row["error_ts"] < max(fresh_secs() if fresh is None else fresh, 300)
@@ -757,11 +761,11 @@ def probe(name, kind, secret, binary):
     """One tiny Haiku call on the account, only to read its usage numbers. Returns what it found, for --pool-check."""
     try:
         r = subprocess.run([binary] + PROBE, env=account_env(kind, secret), cwd=tempfile.gettempdir(),
-                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=probe_timeout())
         out, err = r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         touch(name)
-        log("probe_timeout", account=name, message=f"usage check of {name} took over {PROBE_TIMEOUT} s")
+        log("probe_timeout", account=name, message=f"usage check of {name} took over {probe_timeout():g} s")
         return "timeout"
     events = []
     for line in out.splitlines():
@@ -807,9 +811,12 @@ def refresh(pool, names=None, stale_only=False):
             log("refresh_skipped", message="another caller was checking usage; went on with the saved numbers")
             return {}
         binary = real_binary()
+        # Every check is a claude process; on a 2-CPU server seven at once all ran past the timeout.
+        slots = threading.Semaphore(int(env_num("CLAUDE_POOL_PROBES", 0)) or len(pool) or 1)
 
         def one(n):
-            results[n] = probe(n, *pool[n], binary)
+            with slots:
+                results[n] = probe(n, *pool[n], binary)
         threads = [threading.Thread(target=one, args=(n,)) for n in due(load_usage())]
         for t in threads:
             t.start()
@@ -2075,7 +2082,7 @@ def check():
             r = results.get(n)
             text = {"ok": ("login" if kind == "dir" else "token") + " works, usage read", "broken": "token refused: " + str((load_usage().get(n) or {}).get("error")),
                     "no_usage": "claude printed no usage numbers; claude-pool can't pick well with this claude version",
-                    "timeout": f"check took over {PROBE_TIMEOUT} s", "failed": "check failed; see --pool-log"}.get(r, "not checked")
+                    "timeout": f"check took over {probe_timeout():g} s", "failed": "check failed; see --pool-log"}.get(r, "not checked")
             say({"ok": "OK", "broken": "FAIL", "no_usage": "FAIL"}.get(r, "WARN"), f"{n}: {text}")
     alert_cmd = os.environ.get("CLAUDE_POOL_ALERT")
     say("OK" if alert_cmd else "WARN", f"alerts: {alert_cmd}" if alert_cmd else "no CLAUDE_POOL_ALERT; problems go to the log only")

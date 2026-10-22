@@ -74,6 +74,8 @@ if "-p" not in args:
         time.sleep(float(os.environ.get("FAKE_WAIT", "15")))
     print("session done on " + tok)
     sys.exit(0)
+if "Reply ok." in args:  # a usage check
+    time.sleep(float(os.environ.get("FAKE_PROBE_SLEEP", "0")))
 prompt = args[args.index("-p") + 1] if "-p" in args and args.index("-p") + 1 < len(args) and not args[args.index("-p") + 1].startswith("-") else sys.stdin.read()
 reset = int(time.time()) + 3600
 def out(e): print(json.dumps(e), flush=True)
@@ -902,6 +904,17 @@ class PoolTest(unittest.TestCase):
         self.run_pool("--version", CLAUDE_POOL_FRESH="300")
         self.assertEqual(self.calls()[0]["token"], "tok-a")
         self.assertIn("Reply ok.", self.calls()[0]["args"])
+
+    def test_probes_run_one_at_a_time_and_time_out_by_setting(self):
+        self.add("a", "tok-a")
+        self.add("b", "tok-b")
+        self.run_pool("--pool-check", CLAUDE_POOL_PROBES="1", CLAUDE_POOL_PROBE_TIMEOUT="5", FAKE_PROBE_SLEEP="0.5")
+        starts = sorted(int(f.split("-")[0]) for f in os.listdir(self.log)
+                        if f[0].isdigit() and "Reply ok." in open(os.path.join(self.log, f)).read())
+        self.assertEqual(len(self.probes()), 2)
+        self.assertGreaterEqual((starts[1] - starts[0]) / 1e9, 0.5)  # the second started after the first ended
+        r = self.run_pool("--pool-check", CLAUDE_POOL_FRESH="0", CLAUDE_POOL_PROBE_TIMEOUT="0.2", FAKE_PROBE_SLEEP="1")
+        self.assertIn("check took over 0.2 s", r.stdout)
 
     def test_fresh_numbers_are_not_probed(self):
         self.add("a", "tok-a")
