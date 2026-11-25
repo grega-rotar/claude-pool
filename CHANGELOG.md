@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.3
+
+- **Usage numbers from newer claude versions:** claude now reports only the window that binds (`rateLimitType` + `utilization`), not `unifiedWindows`. The pool read nothing from it, so `--pool-status` showed `-` and "no limit" for every account and picks were blind (it kept running on a 75% account while one sat at 28%). It now reads that one window: a refused one counts as full until its reset, one below the warning threshold as 0, and a weekly reset is no longer stored as the 5-hour reset.
+
 ## 0.16.2
 
 - **Usage checks on a busy server:** `CLAUDE_POOL_PROBE_TIMEOUT` sets the seconds one check may take (15), and `CLAUDE_POOL_PROBES` how many run at once (all). On a 2-CPU server with seven accounts every check ran past 15 s, so the pool picked blind.

@@ -47,7 +47,7 @@ if WINDOWS:
 else:
     import fcntl
 
-__version__ = "0.16.2"
+__version__ = "0.16.3"
 
 EXIT_EXHAUSTED = 75  # EX_TEMPFAIL: every account is at its limit, try again after the reset
 RUN_MAX_AGE = 6 * 3600  # a "running" mark older than this is dropped even if its pid can't be checked
@@ -841,24 +841,46 @@ def refresh_soon(pool):
         refresh(pool, stale_only=True)
 
 
+def single_window(info):
+    """The one window a rate_limit_info names in rateLimitType (claude 2.x+ reports only the window that binds, not
+    unifiedWindows). Utilization comes only from the warning threshold up: below it ("allowed") counts as 0, and a
+    refused window ("rejected") without a number counts as full."""
+    util = info.get("utilization")
+    if not isinstance(util, (int, float)):
+        util = info.get("surpassedThreshold")
+    if not isinstance(util, (int, float)):
+        util = 1.0 if info.get("status") == "rejected" else 0.0
+    return {"utilization": util, "resetsAt": info.get("resetsAt")}
+
+
 def record(name, info, ran=True, error=None):
     """Store one run's rate_limit_info for the account."""
     with usage_update() as usage:
         row = usage.setdefault(name, {})
         if info:
             w = info.get("unifiedWindows") or {}
+            single = not w and info.get("rateLimitType")
+            if single:
+                w = {single: single_window(info)}
             pct = lambda k: round(100 * (w.get(k) or {}).get("utilization", 0), 1) if k in w else row.get(k)  # noqa: E731
+            five_reset = (w.get("five_hour") or {}).get("resetsAt") or (row.get("resets_ts") if single else info.get("resetsAt"))
+            if single and "five_hour" not in w and five_reset == (w.get("seven_day") or {}).get("resetsAt"):
+                five_reset = None  # a weekly reset that older versions stored as the 5-hour one
             row.update(status=info.get("status"), five_hour=pct("five_hour"), seven_day=pct("seven_day"),
-                       resets_ts=(w.get("five_hour") or {}).get("resetsAt") or info.get("resetsAt"),
+                       resets_ts=five_reset,
                        seven_day_resets_ts=(w.get("seven_day") or {}).get("resetsAt") or row.get("seven_day_resets_ts"),
                        checked_ts=time.time())
             if "seven_day" in w:
                 row.pop("weekly", None)
-            elif w:  # the report lists the account's windows and no weekly one: no weekly limit (Team accounts)
+            elif w and not single:  # the report lists the account's windows and no weekly one: no weekly limit (Team accounts)
                 row.update(weekly="none", seven_day=None, seven_day_resets_ts=None)
             extra = {k: [round(100 * (v.get("utilization") or 0), 1), v["resetsAt"]] for k, v in w.items()
                      if k.startswith("seven_day_") and isinstance(v, dict) and isinstance(v.get("resetsAt"), (int, float))}
-            if extra:
+            if single:  # one window per report: keep the other weekly windows seen before
+                row["weeks"] = {**(row.get("weeks") if isinstance(row.get("weeks"), dict) else {}), **extra}
+                if not row["weeks"]:
+                    row.pop("weeks")
+            elif extra:
                 row["weeks"] = extra
             else:
                 row.pop("weeks", None)

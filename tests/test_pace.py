@@ -289,6 +289,56 @@ class PaceTest(unittest.TestCase):
         row = self.recorded({"five_hour": {"utilization": 0.14, "resetsAt": time.time() + H}}, old)
         self.assertEqual((row["weekly"], row["seven_day"]), ("none", None))
 
+    def single(self, info, old=None):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        os.environ["CLAUDE_POOL_STATE"] = os.path.join(tmp, "usage.json")
+        if old:
+            with open(os.environ["CLAUDE_POOL_STATE"], "w") as f:
+                json.dump({"a": old}, f)
+        cp.record("a", info, ran=False)
+        return cp.load_usage()["a"]
+
+    def test_single_window_report_reads_weekly_use(self):
+        reset = time.time() + 50 * H
+        row = self.single({"status": "allowed_warning", "resetsAt": reset, "rateLimitType": "seven_day", "utilization": 0.41})
+        self.assertEqual((row["seven_day"], row["seven_day_resets_ts"]), (41.0, reset))
+        self.assertNotIn("weekly", row)
+        self.assertEqual(cp.pace(row, time.time())[0], "known")
+        self.assertIsNone(row.get("resets_ts"))  # the weekly reset is not the 5-hour reset
+
+    def test_single_window_drops_a_weekly_reset_stored_as_the_five_hour_one(self):
+        reset = time.time() + 50 * H
+        row = self.single({"status": "allowed", "resetsAt": reset, "rateLimitType": "seven_day"}, {"resets_ts": reset})
+        self.assertIsNone(row["resets_ts"])
+
+    def test_single_window_rejected_week_is_full_until_its_reset(self):
+        reset = time.time() + 30 * H
+        row = self.single({"status": "rejected", "resetsAt": reset, "rateLimitType": "seven_day"})
+        self.assertEqual(row["seven_day"], 100.0)
+        self.assertEqual(cp.at_limit(row), reset)
+
+    def test_single_window_five_hour_keeps_weekly_numbers(self):
+        week = time.time() + 50 * H
+        reset = time.time() + H
+        row = self.single({"status": "rejected", "resetsAt": reset, "rateLimitType": "five_hour"},
+                          {"seven_day": 60, "seven_day_resets_ts": week})
+        self.assertEqual((row["five_hour"], row["resets_ts"], row["seven_day"]), (100.0, reset, 60))
+        self.assertNotIn("weekly", row)
+        self.assertEqual(cp.at_limit(row), reset)
+
+    def test_single_window_allowed_without_number_counts_as_empty(self):
+        row = self.single({"status": "allowed", "resetsAt": time.time() + 50 * H, "rateLimitType": "seven_day"})
+        self.assertEqual(row["seven_day"], 0.0)
+
+    def test_single_window_picks_the_account_with_most_room(self):
+        self.single({"status": "allowed", "rateLimitType": "seven_day"})  # a temp usage file
+        reset = time.time() + 50 * H
+        for name, util in (("busy", 0.75), ("idle", 0.28)):
+            cp.record(name, {"status": "allowed_warning", "resetsAt": reset, "rateLimitType": "seven_day", "utilization": util}, ran=False)
+        pool = {"busy": ("token", "x"), "idle": ("token", "y")}
+        self.assertEqual(cp.choose(pool, cp.load_usage()), "idle")
+
     def test_weekly_window_back_clears_no_limit(self):
         w = {"five_hour": {"utilization": 0.1, "resetsAt": time.time() + H},
              "seven_day": {"utilization": 0.3, "resetsAt": time.time() + 50 * H},
